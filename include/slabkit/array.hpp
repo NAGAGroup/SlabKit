@@ -93,6 +93,15 @@ struct DeviceView {
     T*             ptr_;
     sycl::range<N> range_;
 
+    // Explicit construction from raw pointer + range
+    DeviceView(T* ptr, sycl::range<N> range) noexcept : ptr_{ptr}, range_{range} {}
+
+    // Implicit conversion to const view — DeviceView<T,N> → DeviceView<const T,N>
+    template <typename U>
+        requires std::same_as<T, const U>
+    DeviceView(DeviceView<U, N> other) noexcept
+        : ptr_{other.ptr_}, range_{other.range_} {}
+
     T*             data() const noexcept { return ptr_; }
     sycl::range<N> get_range() const noexcept { return range_; }
     size_t         size() const noexcept { return range_.size(); }
@@ -120,6 +129,16 @@ struct DeviceSubView {
     T*             ptr_;
     sycl::range<N> range_;
     sycl::range<N> strides_;  // element strides, not byte strides
+
+    // Explicit construction from raw pointer + range + strides
+    DeviceSubView(T* ptr, sycl::range<N> range, sycl::range<N> strides) noexcept
+        : ptr_{ptr}, range_{range}, strides_{strides} {}
+
+    // Implicit conversion to const view — DeviceSubView<T,N> → DeviceSubView<const T,N>
+    template <typename U>
+        requires std::same_as<T, const U>
+    DeviceSubView(DeviceSubView<U, N> other) noexcept
+        : ptr_{other.ptr_}, range_{other.range_}, strides_{other.strides_} {}
 
     T*             data() const noexcept { return ptr_; }
     sycl::range<N> get_range() const noexcept { return range_; }
@@ -166,6 +185,10 @@ public:
         return DeviceView<T, N>{ptr_.get(), range_};
     }
 
+    DeviceView<const T, N> const_view() const noexcept {
+        return view();  // implicit conversion via DeviceView<const T,N>(DeviceView<T,N>)
+    }
+
     DeviceSubView<T, N> subview(std::array<size_t, N> offsets,
                                 sycl::range<N> sub_range) const {
         // Compute parent's packed row-major strides
@@ -185,6 +208,11 @@ public:
                    "subview exceeds array bounds");
 
         return DeviceSubView<T, N>{ptr_.get() + linear_offset, sub_range, strides};
+    }
+
+    DeviceSubView<const T, N> const_subview(std::array<size_t, N> offsets,
+                                             sycl::range<N> sub_range) const {
+        return subview(offsets, sub_range);  // implicit conversion via DeviceSubView<const T,N>(DeviceSubView<T,N>)
     }
 
 private:
@@ -212,12 +240,14 @@ DeviceArray<T, N> make_device_array(sycl::range<N> range, const sycl::device& de
 // Tier 1 — contiguous (memcpy, no kernel):
 //   copy_to_host  (DeviceArray,  T* dst, q, deps)
 //   copy_to_host  (DeviceView,   T* dst, q, deps)
+//   copy_to_host  (DeviceView<const T,N>, T* dst, q, deps)  [const view]
 //   copy_to_device(T* src, DeviceArray,  q, deps)
 //   copy_to_device(T* src, DeviceView,   q, deps)
 //   copy          (DeviceArray src, DeviceArray dst, q, deps)
 //
 // Tier 2 — strided host transfers (staging buffer via DeviceScratchMemory):
 //   copy_to_host  (DeviceSubView, T* dst, q, scratch, deps)
+//   copy_to_host  (DeviceSubView<const T,N>, T* dst, q, scratch, deps)  [const view]
 //   copy_to_device(T* src, DeviceSubView, q, scratch, deps)
 //
 // Tier 3 — strided device-to-device (parallel_for kernel, no staging):
@@ -227,7 +257,9 @@ DeviceArray<T, N> make_device_array(sycl::range<N> range, const sycl::device& de
 //
 // Tier 4 — blocking sync wrappers (.wait() internally, named sync_ not copy_):
 //   sync_to_host(DeviceArray,   T* dst, q)
+//   sync_to_host(DeviceView<const T,N>, T* dst, q)  [const view]
 //   sync_to_host(DeviceSubView, T* dst, q, scratch)
+//   sync_to_host(DeviceSubView<const T,N>, T* dst, q, scratch)  [const view]
 //
 // Host pointers (T*) must point to memory accessible from the host side.
 // No hidden allocations — caller provides DeviceScratchMemory for strided transfers.
@@ -247,6 +279,13 @@ sycl::event copy_to_host(const DeviceArray<T, N>& src, T* dst,
 
 template <typename T, int N>
 sycl::event copy_to_host(DeviceView<T, N> src, T* dst,
+                         sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
+    assert(dst != nullptr);
+    return q.memcpy(dst, src.data(), src.byte_size(), deps);
+}
+
+template <typename T, int N>
+sycl::event copy_to_host(DeviceView<const T, N> src, T* dst,
                          sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(dst != nullptr);
     return q.memcpy(dst, src.data(), src.byte_size(), deps);
@@ -316,6 +355,27 @@ sycl::event copy_to_host(DeviceSubView<T, N> src, T* dst,
     });
 
     // Step 2: memcpy staging → host
+    return q.memcpy(dst, staging, n * sizeof(T), {gather});
+}
+
+template <typename T, int N>
+sycl::event copy_to_host(DeviceSubView<const T, N> src, T* dst,
+                         sycl::queue& q, DeviceScratchMemory& scratch,
+                         const std::vector<sycl::event>& deps = {}) {
+    assert(dst != nullptr);
+    const size_t n = src.size();
+    const T* staging = static_cast<const T*>(scratch.allocate(n * sizeof(T), alignof(T)));
+    // gather: strided const device → contiguous staging
+    sycl::event gather = q.submit([&](sycl::handler& h) {
+        h.depends_on(deps);
+        auto sv         = src;
+        const T* stg_ptr = staging;
+        h.parallel_for(src.get_range(), [=](sycl::id<N> id) {
+            const size_t linear_i = detail::row_major_offset(id, sv.get_range());
+            // staging is device memory — write via non-const cast (host can't deref)
+            const_cast<T*>(stg_ptr)[linear_i] = sv[id];
+        });
+    });
     return q.memcpy(dst, staging, n * sizeof(T), {gather});
 }
 
@@ -405,7 +465,18 @@ void sync_to_host(const DeviceArray<T, N>& src, T* dst, sycl::queue& q) {
 }
 
 template <typename T, int N>
+void sync_to_host(DeviceView<const T, N> src, T* dst, sycl::queue& q) {
+    copy_to_host(src, dst, q).wait();
+}
+
+template <typename T, int N>
 void sync_to_host(DeviceSubView<T, N> src, T* dst,
+                  sycl::queue& q, DeviceScratchMemory& scratch) {
+    copy_to_host(src, dst, q, scratch).wait();
+}
+
+template <typename T, int N>
+void sync_to_host(DeviceSubView<const T, N> src, T* dst,
                   sycl::queue& q, DeviceScratchMemory& scratch) {
     copy_to_host(src, dst, q, scratch).wait();
 }
@@ -439,9 +510,18 @@ public:
 
     DeviceView<T, N> view() const noexcept { return device_.view(); }
 
+    DeviceView<const T, N> const_view() const noexcept {
+        return device_.const_view();
+    }
+
     DeviceSubView<T, N> subview(std::array<size_t, N> offsets,
                                 sycl::range<N> sub_range) const {
         return device_.subview(offsets, sub_range);
+    }
+
+    DeviceSubView<const T, N> const_subview(std::array<size_t, N> offsets,
+                                            sycl::range<N> sub_range) const {
+        return device_.const_subview(offsets, sub_range);
     }
 
     const DeviceArray<T, N>& device_array() const noexcept { return device_; }
