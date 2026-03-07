@@ -1,0 +1,36 @@
+[workspace]
+authors = ["Jack Myers <jackhmyers97@gmail.com>"]
+channels = ["https://prefix.dev/code-accelerate", "conda-forge"]
+name = "slabkit"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+configure = "nu scripts/configure.nu"
+build = "nu scripts/build.nu"
+test = "nu scripts/test.nu"
+
+[feature.base.dependencies]
+acpp-toolchain = ">=20.1.8_acpp25.10.0,<21"
+cmake = ">=3.28,<4"
+nushell = ">=0.110.0,<0.111"
+ninja = ">=1.12"
+catch2 = ">=3.8"
+
+[feature.opencl.dependencies]
+intel-opencl-rt = ">=2025.2.0,<2026"
+
+[feature.level-zero.dependencies]
+level-zero = ">=1.28.2,<2"
+
+[feature.cuda.dependencies]
+cuda-nvvm = ">=12.6,<12.7"
+cuda-runtime = ">=12.6,<12.7"
+
+[feature.amd.dependencies]
+hip-runtime-amd = ">=6,<7"
+rocm-device-libs = ">=6,<7"
+
+[environments.default]
+features = ["base", "opencl", "level-zero", "cuda", "amd"]
+solve-group = "default"
