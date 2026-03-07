@@ -4,12 +4,13 @@
 // slabkit/detail/device_pool.hpp — DeviceMemoryPool
 // =============================================================================
 //
-// A fixed-node-size memory pool over a pre-allocated device USM slab.
+// A fixed-node-size memory pool over a device USM slab owned by this pool.
 //
 // Design constraints:
-//   - slab_base is sycl::malloc_device memory — host CPU cannot write into it.
-//   - All metadata lives entirely in host memory (this object).
-//   - The device pointer is treated as an opaque integer offset base.
+//   - DeviceMemoryPool owns its device USM slab — allocated in the constructor
+//     via sycl::malloc_device, freed in the destructor via sycl::free.
+//   - Host CPU cannot write into the slab; it is treated as an opaque offset base.
+//   - All bitmap metadata lives entirely in host memory (this object).
 //
 // Freelist design: two-level bitmap
 //   l0_[i]: bit j set ⟺ slot (i*64 + j) is FREE
@@ -24,7 +25,9 @@
 // Double-free detection: deallocate asserts the slot's free bit is NOT already
 // set. In release builds this becomes a no-op check (assert disabled).
 //
-// Thread safety: NONE. External synchronisation required.
+// Thread safety: all public allocation/deallocation methods are protected by an
+// internal std::mutex. DeviceScratchMemory is NOT covered — thread safety for
+// scratch pools is the caller's responsibility.
 //
 // Prior art: RMM pool_memory_resource, TensorFlow BFC allocator, Intel GPGMM.
 // All store allocation metadata exclusively on the host and treat device
@@ -35,9 +38,12 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <new>
 #include <stdexcept>
 #include <vector>
+
+#include <sycl/sycl.hpp>
 
 namespace slabkit {
 
@@ -47,26 +53,35 @@ public:
     // Construction
     // -------------------------------------------------------------------------
 
-    /// \param slab_base  Opaque device USM pointer (sycl::malloc_device result).
-    ///                   Must remain valid for the lifetime of this object.
-    ///                   The pool does NOT own this pointer — caller manages it.
+    /// Allocates a device USM slab of \p slab_size bytes and owns it.
+    /// \param dev        SYCL device to allocate on.
+    /// \param ctx        Shared SYCL context compatible with \p dev. Kept alive for the lifetime of this pool.
+    /// \param slab_size  Total slab size in bytes. Must be a multiple of node_size.
     /// \param node_size  Granularity of each slot in bytes. Must be > 0.
-    /// \param slot_count Number of slots. slab must be >= node_size * slot_count.
-    DeviceMemoryPool(void* slab_base, std::size_t node_size, std::size_t slot_count)
-        : slab_base_{static_cast<char*>(slab_base)}
+    /// \throws std::bad_alloc if sycl::malloc_device fails.
+    DeviceMemoryPool(const sycl::device& dev,
+                     std::shared_ptr<sycl::context> ctx,
+                     std::size_t slab_size,
+                     std::size_t node_size)
+        : ctx_{std::move(ctx)}
+        , slab_base_{nullptr}
         , node_size_{node_size}
-        , slot_count_{slot_count}
-        , free_count_{slot_count}
-        , l0_((slot_count + 63) / 64, ~uint64_t{0})   // all bits set = all free
-        , l1_((l0_.size() + 63) / 64, ~uint64_t{0})   // all groups have free slots
+        , slot_count_{slab_size / node_size}
+        , free_count_{slab_size / node_size}
+        , l0_((slab_size / node_size + 63) / 64, ~uint64_t{0})
+        , l1_(((slab_size / node_size + 63) / 64 + 63) / 64, ~uint64_t{0})
     {
-        assert(slab_base != nullptr);
         assert(node_size > 0);
-        assert(slot_count > 0);
+        assert(slab_size > 0);
+        assert(slab_size % node_size == 0);
 
-        // Mask off trailing phantom bits in the last l0_ word so they don't
-        // appear as free slots beyond slot_count.
-        const std::size_t used_bits = slot_count % 64;
+        void* ptr = sycl::malloc_device(slab_size, dev, *ctx_);
+        if (!ptr)
+            throw std::bad_alloc{};
+        slab_base_ = static_cast<char*>(ptr);
+
+        // Mask off trailing phantom bits in the last l0_ word.
+        const std::size_t used_bits = slot_count_ % 64;
         if (used_bits != 0)
             l0_.back() = (uint64_t{1} << used_bits) - 1;
 
@@ -78,10 +93,13 @@ public:
 
     DeviceMemoryPool(const DeviceMemoryPool&)            = delete;
     DeviceMemoryPool& operator=(const DeviceMemoryPool&) = delete;
-    DeviceMemoryPool(DeviceMemoryPool&&)                 = default;
-    DeviceMemoryPool& operator=(DeviceMemoryPool&&)      = default;
+    DeviceMemoryPool(DeviceMemoryPool&&)                 = delete;
+    DeviceMemoryPool& operator=(DeviceMemoryPool&&)      = delete;
 
-    ~DeviceMemoryPool() = default;
+    ~DeviceMemoryPool() {
+        if (slab_base_)
+            sycl::free(slab_base_, *ctx_);
+    }
 
     // -------------------------------------------------------------------------
     // Single-node allocation — O(1)
@@ -90,32 +108,15 @@ public:
     /// Allocates one slot of node_size() bytes.
     /// \throws std::bad_alloc if the pool is full.
     void* allocate_node() {
-        if (free_count_ == 0)
-            throw std::bad_alloc{};
-
-        // Find a group with a free slot via l1_.
-        const std::size_t l1_word = find_set_bit_word(l1_);
-        const std::size_t group   = l1_word * 64 + static_cast<std::size_t>(
-                                        std::countr_zero(l1_[l1_word]));
-
-        assert(group < l0_.size());
-        assert(l0_[group] != 0);
-
-        const std::size_t bit  = static_cast<std::size_t>(std::countr_zero(l0_[group]));
-        const std::size_t slot = group * 64 + bit;
-
-        assert(slot < slot_count_);
-        mark_used(slot);
-        return slot_to_ptr(slot);
+        std::lock_guard<std::mutex> lock(mutex_);
+        return allocate_node_unlocked();
     }
 
     /// Deallocates a single node previously returned by allocate_node().
     /// \pre ptr must be a value returned by allocate_node() on this pool.
     void deallocate_node(void* ptr) noexcept {
-        const std::size_t slot = ptr_to_slot(ptr);
-        assert(slot < slot_count_);
-        assert(!is_free(slot) && "double-free detected in DeviceMemoryPool");
-        mark_free(slot);
+        std::lock_guard<std::mutex> lock(mutex_);
+        deallocate_node_unlocked(ptr);
     }
 
     // -------------------------------------------------------------------------
@@ -125,10 +126,12 @@ public:
     /// Allocates n contiguous slots (n * node_size() bytes).
     /// \throws std::bad_alloc if no contiguous run of n free slots exists.
     void* allocate_array(std::size_t n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
         if (n == 0)
             return nullptr;
         if (n == 1)
-            return allocate_node();
+            return allocate_node_unlocked();
         if (free_count_ < n)
             throw std::bad_alloc{};
 
@@ -143,10 +146,12 @@ public:
     /// Deallocates n contiguous slots previously returned by allocate_array(n).
     /// \pre ptr and n must match a prior allocate_array(n) call on this pool.
     void deallocate_array(void* ptr, std::size_t n) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
         if (n == 0 || ptr == nullptr)
             return;
         if (n == 1) {
-            deallocate_node(ptr);
+            deallocate_node_unlocked(ptr);
             return;
         }
 
@@ -183,6 +188,37 @@ private:
 
     std::size_t ptr_to_slot(void* ptr) const noexcept {
         return (static_cast<char*>(ptr) - slab_base_) / node_size_;
+    }
+
+    // -------------------------------------------------------------------------
+    // Unlocked allocation helpers (called under mutex_ lock)
+    // -------------------------------------------------------------------------
+
+    void* allocate_node_unlocked() {
+        if (free_count_ == 0)
+            throw std::bad_alloc{};
+
+        // Find a group with a free slot via l1_.
+        const std::size_t l1_word = find_set_bit_word(l1_);
+        const std::size_t group   = l1_word * 64 + static_cast<std::size_t>(
+                                        std::countr_zero(l1_[l1_word]));
+
+        assert(group < l0_.size());
+        assert(l0_[group] != 0);
+
+        const std::size_t bit  = static_cast<std::size_t>(std::countr_zero(l0_[group]));
+        const std::size_t slot = group * 64 + bit;
+
+        assert(slot < slot_count_);
+        mark_used(slot);
+        return slot_to_ptr(slot);
+    }
+
+    void deallocate_node_unlocked(void* ptr) noexcept {
+        const std::size_t slot = ptr_to_slot(ptr);
+        assert(slot < slot_count_);
+        assert(!is_free(slot) && "double-free detected in DeviceMemoryPool");
+        mark_free(slot);
     }
 
     // -------------------------------------------------------------------------
@@ -380,13 +416,16 @@ private:
     // Data members
     // -------------------------------------------------------------------------
 
-    char*       slab_base_;    // device memory base — never dereferenced from host
-    std::size_t node_size_;
-    std::size_t slot_count_;
-    std::size_t free_count_;
+    std::shared_ptr<sycl::context> ctx_;             // context used for sycl::free on destruction
+    char*              slab_base_   = nullptr;        // device memory base — never dereferenced from host
+    std::size_t        node_size_   = 0;
+    std::size_t        slot_count_  = 0;
+    std::size_t        free_count_  = 0;
 
     std::vector<uint64_t> l0_;  // one bit per slot,       1 = free
     std::vector<uint64_t> l1_;  // one bit per 64-slot group, 1 = group has free slot
+
+    mutable std::mutex mutex_;  // protects allocation/deallocation operations
 };
 
 } // namespace slabkit

@@ -187,6 +187,7 @@ TEST_CASE("MirroredArray sync", "[array][mirrored]") {
         REQUIRE(h[0] == 10.0f);
         REQUIRE(h[3] == 40.0f);
     }
+    q.wait();
 }
 
 // =============================================================================
@@ -216,6 +217,7 @@ TEST_CASE("copy_to_host returns sycl::event", "[array][transfer]") {
         slabkit::copy_to_host(arr.view(), dst.data(), q).wait();
         REQUIRE(dst == src);
     }
+    q.wait();
 }
 
 TEST_CASE("copy_to_device returns sycl::event", "[array][transfer]") {
@@ -241,6 +243,7 @@ TEST_CASE("copy_to_device returns sycl::event", "[array][transfer]") {
         slabkit::sync_to_host(arr, dst.data(), q);
         REQUIRE(dst == src);
     }
+    q.wait();
 }
 
 // =============================================================================
@@ -288,6 +291,7 @@ TEST_CASE("parallel_for with DeviceView capture — element-wise kernel", "[arra
         slabkit::sync_to_host(arr, out.data(), q);
         REQUIRE(out == std::vector<int>{0, 1, 2, 3, 4, 5});
     }
+    q.wait();
 }
 
 TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
@@ -334,6 +338,7 @@ TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
         slabkit::sync_to_host(result_arr, out.data(), q);
         REQUIRE(out == std::vector<int>{11, 22, 33, 44, 55, 66});
     }
+    q.wait();
 }
 
 TEST_CASE("parallel_for writing into DeviceSubView capture — strided write", "[array][kernel][subview]") {
@@ -371,6 +376,7 @@ TEST_CASE("parallel_for writing into DeviceSubView capture — strided write", "
         REQUIRE(out[4]  == 0);
         REQUIRE(out[15] == 0);
     }
+    q.wait();
 }
 
 TEST_CASE("parallel_for reading from DeviceSubView, writing to DeviceView — gather", "[array][kernel][subview]") {
@@ -403,4 +409,5 @@ TEST_CASE("parallel_for reading from DeviceSubView, writing to DeviceView — ga
         slabkit::sync_to_host(dst_arr, out.data(), q);
         REQUIRE(out == std::vector<int>{6, 7, 10, 11});
     }
+    q.wait();
 }

@@ -204,12 +204,7 @@ unique_device_ptr<T> malloc_unique_device_ptr(const sycl::device& dev, size_t co
 /// pool when the DeviceScratchMemory is destroyed.
 inline DeviceScratchMemory make_scratch_memory(const sycl::device& dev,
                                                size_t scratch_size = 64 * 1024) {
-    auto pool               = AllocatorRegistry::get().pool(dev);
-    const size_t node_size  = pool->node_size();
-    const size_t slot_count = (scratch_size + node_size - 1) / node_size;
-    const size_t byte_count = slot_count * node_size;
-    auto owner = malloc_shared_device_ptr<std::byte>(pool, byte_count);
-    return DeviceScratchMemory{std::move(owner), byte_count};
+    return DeviceScratchMemory{AllocatorRegistry::get().pool(dev), scratch_size};
 }
 
 /// Create a DeviceScratchMemory owning a region allocated from a
@@ -217,11 +212,7 @@ inline DeviceScratchMemory make_scratch_memory(const sycl::device& dev,
 /// pool when the DeviceScratchMemory is destroyed.
 inline DeviceScratchMemory make_scratch_memory(std::shared_ptr<DeviceMemoryPool> pool,
                                                size_t scratch_size = 64 * 1024) {
-    const size_t node_size  = pool->node_size();
-    const size_t slot_count = (scratch_size + node_size - 1) / node_size;
-    const size_t byte_count = slot_count * node_size;
-    auto owner = malloc_shared_device_ptr<std::byte>(pool, byte_count);
-    return DeviceScratchMemory{std::move(owner), byte_count};
+    return DeviceScratchMemory{std::move(pool), scratch_size};
 }
 
 // =============================================================================
@@ -261,6 +252,20 @@ inline sycl::queue make_queue_with_properties(const sycl::device& dev,
 // ─────────────────────────────────────────────────────────────────────────────
 
 inline AllocatorRegistry& AllocatorRegistry::get() {
+    // Force AdaptiveCpp's allocation_tracker::amap (a function-local static
+    // inside allocation_tracker.cpp) to be constructed before AllocatorRegistry::instance.
+    // Function-local statics destruct in reverse construction order; without this,
+    // amap destructs before instance, so sycl::free in DeviceMemoryPool::~DeviceMemoryPool
+    // calls into a dead amap → SEGFAULT.
+    [[maybe_unused]] static const bool amap_anchor_ = [] {
+        auto devs = sycl::device::get_devices();
+        if (!devs.empty()) {
+            sycl::context ctx{devs[0]};
+            if (void* p = sycl::malloc_device(1, devs[0], ctx))
+                sycl::free(p, ctx);
+        }
+        return true;
+    }();
     static AllocatorRegistry instance;
     std::call_once(instance.registry_init_, [&] { instance.init(); });
     return instance;
@@ -268,33 +273,14 @@ inline AllocatorRegistry& AllocatorRegistry::get() {
 
 inline void AllocatorRegistry::init_pool(size_t idx) {
     std::lock_guard<std::mutex> lk{sycl_init_mutex_};
-    const Config& cfg      = config();
-    const size_t  slab_sz  = device_slab_sizes_[idx];
-    const size_t  slot_cnt = slab_sz / cfg.node_size;
+    const Config& cfg     = config();
+    const size_t  slab_sz = device_slab_sizes_[idx];
 
-    // Allocate the device slab for this pool
-    void* slab_ptr = sycl::malloc_device(slab_sz,
-                                          device_list_[idx],
-                                          *device_context_[idx]);
-    if (!slab_ptr)
-        throw std::bad_alloc{};
-
-    // Wrap slab in a shared_ptr with a SYCL-free deleter so the pool
-    // can be shared without the registry needing to track the raw pointer.
-    auto ctx_copy = device_context_[idx];
-    auto slab_owner = std::shared_ptr<void>(
-        slab_ptr,
-        [ctx_copy](void* p) noexcept { sycl::free(p, *ctx_copy); });
-
-    // Construct pool — does NOT own slab_ptr, so we store slab_owner alongside.
-    // Use a custom deleter on the DeviceMemoryPool shared_ptr that keeps
-    // slab_owner alive until the pool itself is destroyed.
-    pools_[idx] = std::shared_ptr<DeviceMemoryPool>(
-        new DeviceMemoryPool(slab_ptr, cfg.node_size, slot_cnt),
-        [slab_owner](DeviceMemoryPool* p) mutable noexcept {
-            delete p;
-            // slab_owner goes out of scope here → sycl::free called
-        });
+    pools_[idx] = std::make_shared<DeviceMemoryPool>(
+        device_list_[idx],
+        device_context_[idx],
+        slab_sz,
+        cfg.node_size);
 }
 
 inline void AllocatorRegistry::init() {
