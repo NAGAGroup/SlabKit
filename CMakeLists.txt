@@ -3,7 +3,7 @@ project(
     slabkit
     VERSION 0.1.0
     LANGUAGES CXX
-    DESCRIPTION "NAGA: Nonlocal Acoustic GPU Accelerated LBM"
+    DESCRIPTION "Thin RAII wrappers and memory pools over SYCL USM"
 )
 
 set(CMAKE_CXX_STANDARD 20)
@@ -11,4 +11,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(AdaptiveCpp REQUIRED)
+find_package(Catch2 3 REQUIRED)
+
+# Header-only interface target
+add_library(slabkit INTERFACE)
+target_include_directories(slabkit INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+enable_testing()
+add_subdirectory(tests)
 

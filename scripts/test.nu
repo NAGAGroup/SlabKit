@@ -1,3 +1,3 @@
 def main [preset: string = "default"] {
-  ctest $"(path join build $preset)"
+  ctest --test-dir $"(echo build | path join $preset)" --output-on-failure
 }

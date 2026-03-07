@@ -1,3 +1,3 @@
 def main [preset: string = "default"] {
-  cmake --build $"(path join build $preset)"
+  cmake --build $"(echo build | path join $preset)"
 }
