@@ -68,14 +68,21 @@ public:
     /// \throws std::out_of_range if the device_index is invalid.
     const sycl::device& device_by_index(size_t device_index);
 
-    /// Creates a sycl::queue for the given device using the registry's context.
+    /// Creates an in-order sycl::queue for the given device using the registry's context.
+    /// In-order means each operation waits for the previous one to complete.
     /// This guarantees the queue shares the same context as the USM allocations.
     /// \throws std::invalid_argument if the device was not discovered at init() time.
     sycl::queue make_queue(const sycl::device& dev);
 
-    /// Creates a sycl::queue with properties for the given device using the registry's context.
+    /// Creates a sycl::queue with a fully caller-specified property list.
+    /// The caller is responsible for all properties — no hidden additions.
     /// \throws std::invalid_argument if the device was not discovered at init() time.
-    sycl::queue make_queue(const sycl::device& dev, const sycl::property_list& props);
+    sycl::queue make_queue_with_properties(const sycl::device& dev, const sycl::property_list& props);
+
+    /// Creates an out-of-order sycl::queue for the given device using the registry's context.
+    /// Operations may execute concurrently; caller is responsible for event dependencies.
+    /// \throws std::invalid_argument if the device was not discovered at init() time.
+    sycl::queue make_out_of_order_queue(const sycl::device& dev);
 
     // Configuration struct for memory allocation
     struct Config {
@@ -221,16 +228,28 @@ inline DeviceScratchMemory make_scratch_memory(std::shared_ptr<DeviceMemoryPool>
 // Queue factory — always use these to construct queues, never sycl::queue{}
 // directly. Guarantees the queue uses the same context as the allocator registry,
 // making USM pointers valid for the returned queue.
+//
+// make_queue                → in-order  (default — each op waits for previous)
+// make_out_of_order_queue   → out-of-order (concurrent ops, caller manages event deps)
+// make_queue_with_properties → fully caller-specified property list, no hidden additions
 // =============================================================================
 
-/// Creates a context-compatible queue for the given device.
+/// Creates an in-order context-compatible queue for the given device.
 inline sycl::queue make_queue(const sycl::device& dev) {
     return AllocatorRegistry::get().make_queue(dev);
 }
 
-/// Creates a context-compatible queue with properties for the given device.
-inline sycl::queue make_queue(const sycl::device& dev, const sycl::property_list& props) {
-    return AllocatorRegistry::get().make_queue(dev, props);
+/// Creates an out-of-order context-compatible queue for the given device.
+/// Operations may execute concurrently; caller is responsible for event dependencies.
+inline sycl::queue make_out_of_order_queue(const sycl::device& dev) {
+    return AllocatorRegistry::get().make_out_of_order_queue(dev);
+}
+
+/// Creates a context-compatible queue with a fully caller-specified property list.
+/// The caller owns all properties — no in_order or other properties are added.
+inline sycl::queue make_queue_with_properties(const sycl::device& dev,
+                                               const sycl::property_list& props) {
+    return AllocatorRegistry::get().make_queue_with_properties(dev, props);
 }
 
 // =============================================================================
@@ -379,13 +398,18 @@ inline const sycl::device& AllocatorRegistry::device_by_index(size_t device_inde
 }
 
 inline sycl::queue AllocatorRegistry::make_queue(const sycl::device& dev) {
-    const size_t idx = device_index(dev);  // throws if not found
-    return sycl::queue{*device_context_[idx], dev};
+    const size_t idx = device_index(dev);
+    return sycl::queue{*device_context_[idx], dev, sycl::property::queue::in_order{}};
 }
 
-inline sycl::queue AllocatorRegistry::make_queue(const sycl::device& dev,
-                                                  const sycl::property_list& props) {
-    const size_t idx = device_index(dev);  // throws if not found
+inline sycl::queue AllocatorRegistry::make_out_of_order_queue(const sycl::device& dev) {
+    const size_t idx = device_index(dev);
+    return sycl::queue{*device_context_[idx], dev};  // SYCL default is out-of-order
+}
+
+inline sycl::queue AllocatorRegistry::make_queue_with_properties(const sycl::device& dev,
+                                                                   const sycl::property_list& props) {
+    const size_t idx = device_index(dev);
     return sycl::queue{*device_context_[idx], dev, props};
 }
 
