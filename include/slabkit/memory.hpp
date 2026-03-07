@@ -1,387 +1,397 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
-#include <list>
 #include <memory>
-#include <unordered_map>
+#include <mutex>
+#include <stdexcept>
 #include <vector>
 
 #include <sycl/sycl.hpp>
 
-#include <foonathan/memory/memory_pool.hpp>
-#include <foonathan/memory/memory_pool_type.hpp>
-#include <foonathan/memory/memory_stack.hpp>
-#include <foonathan/memory/namespace_alias.hpp>
+#include "slabkit/detail/device_pool.hpp"
+#include "slabkit/detail/device_stack.hpp"
+
+namespace slabkit {
 
 // =============================================================================
-// Forward declarations
+// DeviceUSMFromPoolDeleter — deleter for USM pointers from DeviceMemoryPool
 // =============================================================================
-
-class DevicePageAllocatorImpl;
-class AllocatorRegistry;
-
-// =============================================================================
-// FreeBlock
-// =============================================================================
-
-struct FreeBlock {
-  size_t offset;
-  size_t size;
-};
-
-// =============================================================================
-// SubAllocator
-// =============================================================================
-
-struct SubAllocator {
-  void *base;
-  size_t page_start;
-  size_t page_count;
-  size_t capacity;
-  size_t live_count = 0;
-  size_t max_free = 0;
-
-  std::vector<FreeBlock> free_list;
-
-  SubAllocator(void *base, size_t page_start, size_t page_count,
-               size_t page_size)
-      : base(base), page_start(page_start), page_count(page_count),
-        capacity(page_count * page_size), max_free(page_count * page_size) {
-    free_list.push_back({0, capacity});
-  }
-
-  void *allocate(size_t size, size_t align) {
-    for (size_t i = 0; i < free_list.size(); ++i) {
-      auto &blk = free_list[i];
-
-      size_t aligned_offset = (blk.offset + align - 1) & ~(align - 1);
-      size_t padding = aligned_offset - blk.offset;
-
-      if (padding + size > blk.size)
-        continue;
-
-      void *ptr = static_cast<char *>(base) + aligned_offset;
-      size_t remaining = blk.size - padding - size;
-
-      if (remaining == 0) {
-        blk = free_list.back();
-        free_list.pop_back();
-      } else {
-        blk.offset = aligned_offset + size;
-        blk.size = remaining;
-      }
-
-      ++live_count;
-      recompute_max_free();
-      return ptr;
-    }
-    return nullptr;
-  }
-
-  void deallocate(void *ptr, size_t size) {
-    size_t offset = static_cast<char *>(ptr) - static_cast<char *>(base);
-    free_list.push_back({offset, size});
-    --live_count;
-    if (size > max_free)
-      max_free = size;
-  }
-
-  bool can_fit(size_t size) const noexcept { return size <= max_free; }
-  bool is_empty() const noexcept { return live_count == 0; }
-
-private:
-  void recompute_max_free() {
-    max_free = 0;
-    for (const auto &blk : free_list)
-      if (blk.size > max_free)
-        max_free = blk.size;
-  }
-};
-
-// =============================================================================
-// DevicePageAllocatorImpl
-// =============================================================================
-
-class DevicePageAllocatorImpl {
-public:
-  DevicePageAllocatorImpl(sycl::queue &q, size_t total_size, size_t page_size)
-      : slab_(sycl::malloc_device(total_size, q)), ctx_(q.get_context()),
-        page_size_(page_size), page_count_(total_size / page_size),
-        page_map_(page_count_, nullptr) {
-    assert(total_size % page_size == 0);
-    assert(page_size % alignof(std::max_align_t) == 0);
-    recompute_max_contiguous_pages();
-    update_max_node_size();
-  }
-
-  ~DevicePageAllocatorImpl() { sycl::free(slab_, ctx_); }
-
-  DevicePageAllocatorImpl(const DevicePageAllocatorImpl &) = delete;
-  DevicePageAllocatorImpl &operator=(const DevicePageAllocatorImpl &) = delete;
-  DevicePageAllocatorImpl(DevicePageAllocatorImpl &&) = delete;
-  DevicePageAllocatorImpl &operator=(DevicePageAllocatorImpl &&) = delete;
-
-  void *allocate_node(size_t size, size_t align) {
-    if (size == 0 || size > max_node_size_)
-      throw std::bad_alloc{};
-
-    if (size < page_size_) {
-      for (auto &sub : sub_allocators_) {
-        if (!sub.can_fit(size))
-          continue;
-
-        size_t old_max = sub.max_free;
-        void *ptr = sub.allocate(size, align);
-        if (!ptr)
-          continue;
-
-        if (old_max == max_sub_free_)
-          recompute_max_sub_free();
-        update_max_node_size();
-        return ptr;
-      }
-
-      SubAllocator &sub = make_sub_allocator(find_free_pages(1), 1);
-      void *ptr = sub.allocate(size, align);
-      assert(ptr);
-      recompute_max_sub_free();
-      update_max_node_size();
-      return ptr;
-
-    } else {
-      size_t pages_needed = (size + page_size_ - 1) / page_size_;
-      SubAllocator &sub =
-          make_sub_allocator(find_free_pages(pages_needed), pages_needed);
-      void *ptr = sub.allocate(size, align);
-      assert(ptr);
-      recompute_max_sub_free();
-      update_max_node_size();
-      return ptr;
-    }
-  }
-
-  void deallocate_node(void *ptr, size_t size, size_t /*align*/) noexcept {
-    size_t page_index =
-        (static_cast<char *>(ptr) - static_cast<char *>(slab_)) / page_size_;
-    SubAllocator *sub = page_map_[page_index];
-    assert(sub && "double free or pointer not from this allocator");
-
-    sub->deallocate(ptr, size);
-
-    if (sub->is_empty()) {
-      release_sub_allocator(sub);
-      return;
-    }
-
-    if (sub->max_free > max_sub_free_)
-      max_sub_free_ = sub->max_free;
-    update_max_node_size();
-  }
-
-  size_t max_node_size() const noexcept { return max_node_size_; }
-
-private:
-  void *slab_;
-  sycl::context ctx_;
-  size_t page_size_;
-  size_t page_count_;
-
-  std::vector<SubAllocator *> page_map_;
-  std::list<SubAllocator> sub_allocators_;
-
-  size_t max_contiguous_pages_ = 0;
-  size_t max_sub_free_ = 0;
-  size_t max_node_size_ = 0;
-
-  void recompute_max_contiguous_pages() {
-    size_t best = 0, run = 0;
-    for (size_t i = 0; i < page_count_; ++i) {
-      run = page_map_[i] ? 0 : run + 1;
-      if (run > best)
-        best = run;
-    }
-    max_contiguous_pages_ = best;
-  }
-
-  void recompute_max_sub_free() {
-    max_sub_free_ = 0;
-    for (const auto &sub : sub_allocators_)
-      if (sub.max_free > max_sub_free_)
-        max_sub_free_ = sub.max_free;
-  }
-
-  void update_max_node_size() {
-    max_node_size_ =
-        std::max(max_contiguous_pages_ * page_size_, max_sub_free_);
-  }
-
-  size_t find_free_pages(size_t count) {
-    size_t run_start = 0, run_len = 0;
-    for (size_t i = 0; i < page_count_; ++i) {
-      if (page_map_[i] == nullptr) {
-        if (run_len == 0)
-          run_start = i;
-        if (++run_len == count)
-          return run_start;
-      } else {
-        run_len = 0;
-      }
-    }
-    throw std::bad_alloc{};
-  }
-
-  SubAllocator &make_sub_allocator(size_t page_start, size_t pages) {
-    void *base = static_cast<char *>(slab_) + page_start * page_size_;
-    sub_allocators_.emplace_back(base, page_start, pages, page_size_);
-    SubAllocator *sub = &sub_allocators_.back();
-    for (size_t i = page_start; i < page_start + pages; ++i)
-      page_map_[i] = sub;
-    recompute_max_contiguous_pages();
-    return *sub;
-  }
-
-  void release_sub_allocator(SubAllocator *sub) noexcept {
-    for (size_t i = sub->page_start; i < sub->page_start + sub->page_count; ++i)
-      page_map_[i] = nullptr;
-    sub_allocators_.remove_if(
-        [sub](const SubAllocator &s) { return &s == sub; });
-    recompute_max_contiguous_pages();
-    recompute_max_sub_free();
-    update_max_node_size();
-  }
-};
-
-// =============================================================================
-// DevicePageAllocator — lightweight handle, satisfies foonathan RawAllocator
-// =============================================================================
-
-struct DevicePageAllocator {
-  using is_stateful = std::true_type;
-
-  size_t device_index;
-
-  void *allocate_node(size_t size, size_t align) {
-    return AllocatorRegistry::get()
-        .page_impl(device_index)
-        .allocate_node(size, align);
-  }
-
-  void deallocate_node(void *ptr, size_t size, size_t align) noexcept {
-    AllocatorRegistry::get()
-        .page_impl(device_index)
-        .deallocate_node(ptr, size, align);
-  }
-
-  size_t max_node_size() const noexcept {
-    return AllocatorRegistry::get().page_impl(device_index).max_node_size();
-  }
-};
-
-// =============================================================================
-// Type aliases for foonathan allocators backed by DevicePageAllocator
-// =============================================================================
-
-/// Pool for hot-path contiguous array allocations (singleton per device).
-using DeviceMemoryPool =
-    memory::memory_pool<memory::array_pool, DevicePageAllocator>;
-
-/// Stack for scratch memory (user-created, marker-based bulk unwind).
-using DeviceScratchMemory = memory::memory_stack<DevicePageAllocator>;
-
-// =============================================================================
-// AllocatorRegistry — lazy-init singleton, one slab + pool per device
 //
-// On first access for a given device_index, allocates the full slab via
-// sycl::malloc_device on the default context. All subsequent allocations
-// for that device are served from the pre-allocated slab — no further
-// device memory allocations occur.
+// Holds a weak_ptr<DeviceMemoryPool> — does not extend pool lifetime.
+// If pool is destroyed before deleter fires, memory was freed with it, skip silently.
 //
-// Configuration (call before first allocation to override defaults):
-//     AllocatorRegistry::get().set_page_budget(1024 * 1024 * 1024);  // 1 GiB
-//     AllocatorRegistry::get().set_page_size(128 * 1024);            // 128 KiB
+
+template <typename T>
+struct DeviceUSMFromPoolDeleter {
+    size_t                           count;  // number of T elements allocated
+    std::weak_ptr<DeviceMemoryPool> pool;
+
+    void operator()(T* ptr) const noexcept {
+        if (auto p = pool.lock()) {
+            const size_t node_count = (count * sizeof(T) + p->node_size() - 1) / p->node_size();
+            p->deallocate_array(ptr, node_count);
+        }
+        // if expired: pool destroyed, USM memory already freed, nothing to do
+    }
+};
+
+template <typename T>
+using unique_device_ptr = std::unique_ptr<T, DeviceUSMFromPoolDeleter<T>>;
+
 // =============================================================================
+// AllocatorRegistry — singleton, lazy-init per device
+// =============================================================================
+//
+// First call to get() triggers full registry init via std::call_once.
+// All vectors sized once at init, never resized.
+//
+// On first access for a given device, groups devices by platform,
+// creates one shared_ptr<sycl::context> per platform, and lazily
+// constructs the pool with an inline DeviceSlabAllocator.
+//
 
 class AllocatorRegistry {
 public:
-  static AllocatorRegistry &get() {
-    static AllocatorRegistry instance;
-    return instance;
-  }
+    static AllocatorRegistry& get();
 
-  DevicePageAllocatorImpl &page_impl(size_t device_index) {
-    ensure_initialized(device_index);
-    return *page_impls_[device_index];
-  }
+    /// Returns the pool for a given SYCL device.
+    /// \throws std::invalid_argument if the device was not discovered at init() time.
+    std::shared_ptr<DeviceMemoryPool> pool(const sycl::device& dev);
 
-  DeviceMemoryPool &pool(size_t device_index) {
-    ensure_initialized(device_index);
-    return *pools_[device_index];
-  }
+    /// Returns the device index for a given SYCL device.
+    /// \throws std::invalid_argument if the device was not discovered at init() time.
+    size_t device_index(const sycl::device& dev);
 
-  // ── Configuration (call before first allocation) ─────────────────────
+    /// Returns the device for a given device index.
+    /// \throws std::out_of_range if the device_index is invalid.
+    const sycl::device& device_by_index(size_t device_index);
 
-  void set_page_budget(size_t bytes) { page_budget_ = bytes; }
-  void set_page_size(size_t bytes) { page_size_ = bytes; }
-  void set_pool_node_size(size_t bytes) { pool_node_size_ = bytes; }
-  void set_pool_initial_size(size_t bytes) { pool_initial_ = bytes; }
+    /// Creates a sycl::queue for the given device using the registry's context.
+    /// This guarantees the queue shares the same context as the USM allocations.
+    /// \throws std::invalid_argument if the device was not discovered at init() time.
+    sycl::queue make_queue(const sycl::device& dev);
+
+    /// Creates a sycl::queue with properties for the given device using the registry's context.
+    /// \throws std::invalid_argument if the device was not discovered at init() time.
+    sycl::queue make_queue(const sycl::device& dev, const sycl::property_list& props);
+
+    // Configuration struct for memory allocation
+    struct Config {
+        size_t block_size           = 64ull * 1024;   // arena block granularity (bytes)
+        size_t node_size            = 1024;            // pool freelist node size (bytes)
+        float  device_slab_fraction = 0.60f;           // fraction of global_mem_size for non-CPU devices
+        float  cpu_slab_fraction    = 0.30f;           // fraction of global_mem_size for CPU devices
+    };
+
+    // Returns mutable config. Modifications have no effect after the first call to get().
+    static Config& config();
 
 private:
-  AllocatorRegistry() = default;
+    AllocatorRegistry() = default;
 
-  size_t page_budget_ = 512 * 1024 * 1024; // 512 MiB per device
-  size_t page_size_ = 64 * 1024;           // 64 KiB pages
-  size_t pool_node_size_ = 4 * 1024;       // 4 KiB pool nodes
-  size_t pool_initial_ = 1 * 1024 * 1024;  // 1 MiB initial pool block
+    // Called once via registry_init_ on first get()
+    // - Enumerates sycl::device::get_devices() under sycl_init_mutex_
+    // - Groups devices by platform using backend + name as composite key
+    // - Constructs one shared_ptr<sycl::context> per platform
+    // - Populates device_list_, platform_contexts_, device_context_
+    // - Computes device_slab_sizes_ based on Config and device memory
+    // - Resizes pool_flags_, pools_ to device count
+    void init();
 
-  std::unordered_map<size_t, std::unique_ptr<DevicePageAllocatorImpl>>
-      page_impls_;
-  std::unordered_map<size_t, std::unique_ptr<DeviceMemoryPool>> pools_;
+    // Called once per device via pool_flags_[idx]
+    // - Constructs pools_[idx] with DeviceMemoryPool and inline DeviceSlabAllocator
+    void init_pool(size_t idx);
 
-  void ensure_initialized(size_t device_index) {
-    if (pools_.contains(device_index))
-      return;
+    std::once_flag registry_init_;
+    std::mutex     sycl_init_mutex_;  // guards device enumeration + context construction
 
-    auto devices = sycl::device::get_devices();
-    assert(device_index < devices.size() && "device_index out of range");
+    // Populated at init()
+    std::vector<sycl::device>                    device_list_;
+    std::vector<std::shared_ptr<sycl::context>>  platform_contexts_;  // one per platform
+    std::vector<std::shared_ptr<sycl::context>>  device_context_;     // indexed by device index
+    std::vector<size_t>                          device_slab_sizes_;   // computed at init(), indexed by device index
 
-    // Temporary queue on the default context — used only for slab allocation
-    sycl::queue q{devices[device_index]};
-
-    page_impls_[device_index] =
-        std::make_unique<DevicePageAllocatorImpl>(q, page_budget_, page_size_);
-
-    pools_[device_index] = std::make_unique<DeviceMemoryPool>(
-        pool_node_size_, pool_initial_, DevicePageAllocator{device_index});
-  }
+    // Lazy per-device — null until first access
+    std::vector<std::once_flag>                    pool_flags_;
+    std::vector<std::shared_ptr<DeviceMemoryPool>> pools_;
 };
 
 // =============================================================================
-// Queue factory — free function, default context
+// Free functions
 // =============================================================================
 
-/// Create an in-order queue for the given device on the default context.
-inline sycl::queue make_device_queue(size_t device_index) {
-  auto devices = sycl::device::get_devices();
-  assert(device_index < devices.size());
-  return sycl::queue{devices[device_index], sycl::property::queue::in_order{}};
+/// Allocate `count` elements of T from the global pool for device_index.
+/// Returns a shared_ptr<T> — pool reference kept alive via shared ownership.
+/// Deleter holds weak_ptr<DeviceMemoryPool> — does not extend pool lifetime.
+template <typename T>
+std::shared_ptr<T> malloc_shared_device_ptr(size_t count, size_t device_index) {
+    auto pool = AllocatorRegistry::get().pool(AllocatorRegistry::get().device_by_index(device_index));
+    const size_t node_count = (count * sizeof(T) + pool->node_size() - 1) / pool->node_size();
+    T* ptr    = static_cast<T*>(pool->allocate_array(node_count));
+    // Deleter captures shared_ptr to pool — ensures pool outlives this allocation
+    return std::shared_ptr<T>(
+        ptr,
+        [p = std::weak_ptr<DeviceMemoryPool>(pool), count](T* raw) noexcept {
+            if (auto sp = p.lock()) {
+                const size_t node_count = (count * sizeof(T) + sp->node_size() - 1) / sp->node_size();
+                sp->deallocate_array(raw, node_count);
+            }
+        });
+}
+
+/// Allocate `count` elements of T from a user-provided pool.
+/// Returns a shared_ptr<T> — pool reference kept alive via shared ownership.
+/// Deleter holds weak_ptr<DeviceMemoryPool> — does not extend pool lifetime.
+template <typename T>
+std::shared_ptr<T> malloc_shared_device_ptr(std::shared_ptr<DeviceMemoryPool> pool, size_t count) {
+    const size_t node_count = (count * sizeof(T) + pool->node_size() - 1) / pool->node_size();
+    T* ptr    = static_cast<T*>(pool->allocate_array(node_count));
+    // Deleter captures shared_ptr to pool — ensures pool outlives this allocation
+    return std::shared_ptr<T>(
+        ptr,
+        [p = std::weak_ptr<DeviceMemoryPool>(pool), count](T* raw) noexcept {
+            if (auto sp = p.lock()) {
+                const size_t node_count = (count * sizeof(T) + sp->node_size() - 1) / sp->node_size();
+                sp->deallocate_array(raw, node_count);
+            }
+        });
+}
+
+/// Convenience overload: looks up the pool for the given device via AllocatorRegistry.
+template <typename T>
+std::shared_ptr<T> malloc_shared_device_ptr(const sycl::device& dev, size_t count) {
+    return malloc_shared_device_ptr<T>(AllocatorRegistry::get().pool(dev), count);
+}
+
+/// Allocate `count` elements of T from the global pool for device_index.
+/// Returns a unique_device_ptr<T> with DeviceUSMFromPoolDeleter.
+template <typename T>
+unique_device_ptr<T> malloc_unique_device_ptr(size_t count, size_t device_index) {
+    auto pool = AllocatorRegistry::get().pool(AllocatorRegistry::get().device_by_index(device_index));
+    const size_t node_count = (count * sizeof(T) + pool->node_size() - 1) / pool->node_size();
+    T* ptr    = static_cast<T*>(pool->allocate_array(node_count));
+    return unique_device_ptr<T>{ptr,
+                                DeviceUSMFromPoolDeleter<T>{count, std::weak_ptr<DeviceMemoryPool>(pool)}};
+}
+
+/// Allocate `count` elements of T from a user-provided pool.
+/// Returns a unique_device_ptr<T> with DeviceUSMFromPoolDeleter.
+template <typename T>
+unique_device_ptr<T> malloc_unique_device_ptr(std::shared_ptr<DeviceMemoryPool> pool, size_t count) {
+    const size_t node_count = (count * sizeof(T) + pool->node_size() - 1) / pool->node_size();
+    T* ptr    = static_cast<T*>(pool->allocate_array(node_count));
+    return unique_device_ptr<T>{ptr,
+                                DeviceUSMFromPoolDeleter<T>{count, std::weak_ptr<DeviceMemoryPool>(pool)}};
+}
+
+/// Convenience overload: looks up the pool for the given device via AllocatorRegistry.
+template <typename T>
+unique_device_ptr<T> malloc_unique_device_ptr(const sycl::device& dev, size_t count) {
+    return malloc_unique_device_ptr<T>(AllocatorRegistry::get().pool(dev), count);
+}
+
+/// Create a DeviceScratchMemory owning a region allocated from the global
+/// pool for the given device. The memory is automatically returned to the
+/// pool when the DeviceScratchMemory is destroyed.
+inline DeviceScratchMemory make_scratch_memory(const sycl::device& dev,
+                                               size_t scratch_size = 64 * 1024) {
+    auto pool               = AllocatorRegistry::get().pool(dev);
+    const size_t node_size  = pool->node_size();
+    const size_t slot_count = (scratch_size + node_size - 1) / node_size;
+    const size_t byte_count = slot_count * node_size;
+    auto owner = malloc_shared_device_ptr<std::byte>(pool, byte_count);
+    return DeviceScratchMemory{std::move(owner), byte_count};
+}
+
+/// Create a DeviceScratchMemory owning a region allocated from a
+/// user-provided pool. The memory is automatically returned to the
+/// pool when the DeviceScratchMemory is destroyed.
+inline DeviceScratchMemory make_scratch_memory(std::shared_ptr<DeviceMemoryPool> pool,
+                                               size_t scratch_size = 64 * 1024) {
+    const size_t node_size  = pool->node_size();
+    const size_t slot_count = (scratch_size + node_size - 1) / node_size;
+    const size_t byte_count = slot_count * node_size;
+    auto owner = malloc_shared_device_ptr<std::byte>(pool, byte_count);
+    return DeviceScratchMemory{std::move(owner), byte_count};
 }
 
 // =============================================================================
-// Scratch memory factory
+// Queue factory — always use these to construct queues, never sycl::queue{}
+// directly. Guarantees the queue uses the same context as the allocator registry,
+// making USM pointers valid for the returned queue.
 // =============================================================================
 
-/// Create a scratch memory stack for temporary allocations.
-/// The stack bump-allocates forward; use top() / unwind() for bulk reset.
-///
-/// Example:
-///     auto scratch = make_scratch_memory(0, 4 * 1024 * 1024);
-///     auto marker  = scratch.top();
-///     auto* tmp    = scratch.allocate(1024 * sizeof(float), alignof(float));
-///     // use tmp in kernels...
-///     scratch.unwind(marker);  // O(1) bulk free
-///
-inline DeviceScratchMemory make_scratch_memory(size_t device_index,
-                                               size_t budget) {
-  return DeviceScratchMemory{budget, DevicePageAllocator{device_index}};
+/// Creates a context-compatible queue for the given device.
+inline sycl::queue make_queue(const sycl::device& dev) {
+    return AllocatorRegistry::get().make_queue(dev);
 }
+
+/// Creates a context-compatible queue with properties for the given device.
+inline sycl::queue make_queue(const sycl::device& dev, const sycl::property_list& props) {
+    return AllocatorRegistry::get().make_queue(dev, props);
+}
+
+// =============================================================================
+// Implementation
+// =============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AllocatorRegistry implementations
+// ─────────────────────────────────────────────────────────────────────────────
+
+inline AllocatorRegistry& AllocatorRegistry::get() {
+    static AllocatorRegistry instance;
+    std::call_once(instance.registry_init_, [&] { instance.init(); });
+    return instance;
+}
+
+inline void AllocatorRegistry::init_pool(size_t idx) {
+    std::lock_guard<std::mutex> lk{sycl_init_mutex_};
+    const Config& cfg      = config();
+    const size_t  slab_sz  = device_slab_sizes_[idx];
+    const size_t  slot_cnt = slab_sz / cfg.node_size;
+
+    // Allocate the device slab for this pool
+    void* slab_ptr = sycl::malloc_device(slab_sz,
+                                          device_list_[idx],
+                                          *device_context_[idx]);
+    if (!slab_ptr)
+        throw std::bad_alloc{};
+
+    // Wrap slab in a shared_ptr with a SYCL-free deleter so the pool
+    // can be shared without the registry needing to track the raw pointer.
+    auto ctx_copy = device_context_[idx];
+    auto slab_owner = std::shared_ptr<void>(
+        slab_ptr,
+        [ctx_copy](void* p) noexcept { sycl::free(p, *ctx_copy); });
+
+    // Construct pool — does NOT own slab_ptr, so we store slab_owner alongside.
+    // Use a custom deleter on the DeviceMemoryPool shared_ptr that keeps
+    // slab_owner alive until the pool itself is destroyed.
+    pools_[idx] = std::shared_ptr<DeviceMemoryPool>(
+        new DeviceMemoryPool(slab_ptr, cfg.node_size, slot_cnt),
+        [slab_owner](DeviceMemoryPool* p) mutable noexcept {
+            delete p;
+            // slab_owner goes out of scope here → sycl::free called
+        });
+}
+
+inline void AllocatorRegistry::init() {
+    std::lock_guard<std::mutex> lk{sycl_init_mutex_};
+
+    // Enumerate devices
+    device_list_ = sycl::device::get_devices();
+
+    // Group devices by platform
+    // Use backend + name as composite key (do NOT use .get() on platform)
+    std::vector<std::vector<sycl::device>> devices_by_platform;
+    std::vector<std::pair<sycl::backend, std::string>> platform_keys;
+
+    for (const auto& dev : device_list_) {
+        const sycl::platform plat = dev.get_platform();
+        const auto backend        = plat.get_backend();
+        const auto plat_name      = plat.get_info<sycl::info::platform::name>();
+
+        // Find if we've already seen this platform (by backend + name)
+        auto it = std::find_if(platform_keys.begin(), platform_keys.end(),
+                               [backend, &plat_name](const auto& key) {
+                                   return key.first == backend && key.second == plat_name;
+                               });
+
+        if (it == platform_keys.end()) {
+            // New platform
+            platform_keys.push_back({backend, plat_name});
+            devices_by_platform.push_back({dev});
+        } else {
+            // Existing platform
+            const size_t idx = std::distance(platform_keys.begin(), it);
+            devices_by_platform[idx].push_back(dev);
+        }
+    }
+
+    // Create one context per platform
+    for (const auto& dev_group : devices_by_platform) {
+        platform_contexts_.push_back(std::make_shared<sycl::context>(dev_group));
+    }
+
+    // Build device_context_ mapping
+    device_context_.resize(device_list_.size());
+    device_slab_sizes_.resize(device_list_.size());
+    
+    const Config& cfg = config();
+    
+    for (size_t dev_idx = 0; dev_idx < device_list_.size(); ++dev_idx) {
+        const sycl::device& dev       = device_list_[dev_idx];
+        const sycl::platform dev_plat = dev.get_platform();
+        const auto backend            = dev_plat.get_backend();
+        const auto plat_name          = dev_plat.get_info<sycl::info::platform::name>();
+
+        // Find the matching platform context (by backend + name)
+        auto it = std::find_if(platform_keys.begin(), platform_keys.end(),
+                               [backend, &plat_name](const auto& key) {
+                                   return key.first == backend && key.second == plat_name;
+                               });
+        assert(it != platform_keys.end());
+        const size_t plat_idx      = std::distance(platform_keys.begin(), it);
+        device_context_[dev_idx] = platform_contexts_[plat_idx];
+
+        // Compute slab size for this device
+        const size_t total_mem = dev.get_info<sycl::info::device::global_mem_size>();
+        const float  fraction  = dev.is_cpu() ? cfg.cpu_slab_fraction : cfg.device_slab_fraction;
+        const size_t computed  = static_cast<size_t>(total_mem * fraction);
+        const size_t raw = std::max(computed, 2 * cfg.block_size);
+        // Round down to nearest block_size multiple (required by DeviceSlabAllocator assert)
+        device_slab_sizes_[dev_idx] = (raw / cfg.block_size) * cfg.block_size;
+    }
+
+    // Resize once_flag and shared_ptr vectors to device count
+    pool_flags_ = std::vector<std::once_flag>(device_list_.size());
+    pools_.resize(device_list_.size());
+}
+
+inline std::shared_ptr<DeviceMemoryPool> AllocatorRegistry::pool(const sycl::device& dev) {
+    const auto it = std::find(device_list_.begin(), device_list_.end(), dev);
+    if (it == device_list_.end())
+        throw std::invalid_argument(
+            "slabkit: device not found in AllocatorRegistry — "
+            "device must be present at init() time");
+    const size_t idx = static_cast<size_t>(std::distance(device_list_.begin(), it));
+    std::call_once(pool_flags_[idx], [this, idx] { init_pool(idx); });
+    return pools_[idx];
+}
+
+inline size_t AllocatorRegistry::device_index(const sycl::device& dev) {
+    const auto it = std::find(device_list_.begin(), device_list_.end(), dev);
+    if (it == device_list_.end())
+        throw std::invalid_argument(
+            "slabkit: device not found in AllocatorRegistry — "
+            "device must be present at init() time");
+    return static_cast<size_t>(std::distance(device_list_.begin(), it));
+}
+
+inline const sycl::device& AllocatorRegistry::device_by_index(size_t device_index) {
+    if (device_index >= device_list_.size())
+        throw std::out_of_range(
+            "slabkit: device_index out of range");
+    return device_list_[device_index];
+}
+
+inline sycl::queue AllocatorRegistry::make_queue(const sycl::device& dev) {
+    const size_t idx = device_index(dev);  // throws if not found
+    return sycl::queue{*device_context_[idx], dev};
+}
+
+inline sycl::queue AllocatorRegistry::make_queue(const sycl::device& dev,
+                                                  const sycl::property_list& props) {
+    const size_t idx = device_index(dev);  // throws if not found
+    return sycl::queue{*device_context_[idx], dev, props};
+}
+
+inline AllocatorRegistry::Config& AllocatorRegistry::config() {
+    static Config instance;
+    return instance;
+}
+
+}  // namespace slabkit

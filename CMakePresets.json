@@ -7,24 +7,53 @@
   },
   "configurePresets": [
     {
-      "name": "default",
-      "displayName": "Default Config",
+      "name": "base",
+      "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/default",
       "cacheVariables": {
         "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_C_COMPILER": "clang",
-        "CMAKE_BUILD_TYPE": "Debug",
         "ACPP_TARGETS": "generic"
       }
     },
     {
-      "name": "debug",
-      "inherits": ["default"],
-      "displayName": "Builds everything, including example applications in apps/",
-      "binaryDir": "${sourceDir}/build/debug",
+      "name": "default",
+      "displayName": "Library only — Debug",
+      "inherits": ["base"],
+      "binaryDir": "${sourceDir}/build/default",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SLABKIT_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Library only — Release",
+      "inherits": ["base"],
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SLABKIT_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Development — Debug + tests",
+      "inherits": ["base"],
+      "binaryDir": "${sourceDir}/build/dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SLABKIT_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "dev-debug",
+      "displayName": "Development — RelWithDebInfo + tests",
+      "inherits": ["base"],
+      "binaryDir": "${sourceDir}/build/dev-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "SLABKIT_BUILD_TESTS": "ON"
       }
     }
   ],
@@ -34,19 +63,27 @@
       "configurePreset": "default"
     },
     {
-      "name": "debug",
-      "configurePreset": "debug"
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug"
     }
   ],
   "testPresets": [
     {
-      "name": "default",
-      "configurePreset": "default",
+      "name": "dev",
+      "configurePreset": "dev",
       "output": { "outputOnFailure": true }
     },
     {
-      "name": "debug",
-      "configurePreset": "debug",
+      "name": "dev-debug",
+      "configurePreset": "dev-debug",
       "output": { "outputOnFailure": true }
     }
   ]

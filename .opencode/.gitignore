@@ -1,2 +1,6 @@
 !.gitignore
 
+
+!context/
+!context/project-intelligence/
+!context/project-intelligence/**

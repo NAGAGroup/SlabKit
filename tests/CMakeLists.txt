@@ -1,7 +1,17 @@
-add_executable(slabkit_tests
+# Helper function to create SYCL executables
+# Usage: add_sycl_executable(target_name source1.cpp source2.cpp ...)
+function(add_sycl_executable TARGET_NAME)
+    # ${ARGN} contains all arguments after TARGET_NAME
+    add_executable(${TARGET_NAME} ${ARGN})
+    add_sycl_to_target(TARGET ${TARGET_NAME} SOURCES ${ARGN})
+endfunction()
+
+
+add_sycl_executable(slabkit_tests
     test_memory.cpp
     test_array.cpp
 )
+
 
 target_link_libraries(slabkit_tests PRIVATE
     slabkit
