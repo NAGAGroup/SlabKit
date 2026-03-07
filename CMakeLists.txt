@@ -13,12 +13,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(AdaptiveCpp REQUIRED)
 find_package(Catch2 3 REQUIRED)
 
+add_subdirectory(ext/memory)
+
 # Header-only interface target
 add_library(slabkit INTERFACE)
 target_include_directories(slabkit INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+target_link_libraries(slabkit INTERFACE foonathan_memory)
 
 enable_testing()
 add_subdirectory(tests)
