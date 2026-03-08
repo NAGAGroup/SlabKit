@@ -38,12 +38,15 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <stdexcept>
 #include <vector>
 
 #include <sycl/sycl.hpp>
+
+#include "slabkit/error.hpp"
 
 namespace slabkit {
 
@@ -54,16 +57,22 @@ public:
     // -------------------------------------------------------------------------
 
     /// Allocates a device USM slab of \p slab_size bytes and owns it.
-    /// \param dev        SYCL device to allocate on.
-    /// \param ctx        Shared SYCL context compatible with \p dev. Kept alive for the lifetime of this pool.
-    /// \param slab_size  Total slab size in bytes. Must be a multiple of node_size.
-    /// \param node_size  Granularity of each slot in bytes. Must be > 0.
-    /// \throws std::bad_alloc if sycl::malloc_device fails.
+    /// \param dev          SYCL device to allocate on.
+    /// \param ctx          Raw pointer to the SYCL context compatible with \p dev.
+    ///                     Lifetime is guaranteed by the owning SlabContext; validity
+    ///                     on destruction is checked via \p ctx_lifetime.
+    /// \param ctx_lifetime weak_ptr<void> aliased from the owning shared_ptr<SlabContext>.
+    ///                     If expired on destruction, sycl::free is skipped (slab gone with context).
+    /// \param slab_size    Total slab size in bytes. Must be a multiple of node_size.
+    /// \param node_size    Granularity of each slot in bytes. Must be > 0.
+    /// \throws AllocationError if sycl::malloc_device fails.
     DeviceMemoryPool(const sycl::device& dev,
-                     std::shared_ptr<sycl::context> ctx,
+                     sycl::context* ctx,
+                     std::weak_ptr<void> ctx_lifetime,
                      std::size_t slab_size,
                      std::size_t node_size)
-        : ctx_{std::move(ctx)}
+        : ctx_{ctx}
+        , ctx_lifetime_{std::move(ctx_lifetime)}
         , slab_base_{nullptr}
         , node_size_{node_size}
         , slot_count_{slab_size / node_size}
@@ -71,13 +80,15 @@ public:
         , l0_((slab_size / node_size + 63) / 64, ~uint64_t{0})
         , l1_(((slab_size / node_size + 63) / 64 + 63) / 64, ~uint64_t{0})
     {
+        assert(ctx != nullptr);
         assert(node_size > 0);
         assert(slab_size > 0);
         assert(slab_size % node_size == 0);
 
         void* ptr = sycl::malloc_device(slab_size, dev, *ctx_);
         if (!ptr)
-            throw std::bad_alloc{};
+            throw AllocationError{AllocationError::Reason::PoolExhausted,
+                                  "sycl::malloc_device failed for device USM slab"};
         slab_base_ = static_cast<char*>(ptr);
 
         // Mask off trailing phantom bits in the last l0_ word.
@@ -97,8 +108,12 @@ public:
     DeviceMemoryPool& operator=(DeviceMemoryPool&&)      = delete;
 
     ~DeviceMemoryPool() {
-        if (slab_base_)
-            sycl::free(slab_base_, *ctx_);
+        if (slab_base_) {
+            // Only call sycl::free if the owning SlabContext is still alive.
+            // If expired, the context is already gone and the USM slab with it.
+            if (auto alive = ctx_lifetime_.lock())
+                sycl::free(slab_base_, *ctx_);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -106,7 +121,7 @@ public:
     // -------------------------------------------------------------------------
 
     /// Allocates one slot of node_size() bytes.
-    /// \throws std::bad_alloc if the pool is full.
+    /// \throws AllocationError if the pool is full.
     void* allocate_node() {
         std::lock_guard<std::mutex> lock(mutex_);
         return allocate_node_unlocked();
@@ -124,7 +139,7 @@ public:
     // -------------------------------------------------------------------------
 
     /// Allocates n contiguous slots (n * node_size() bytes).
-    /// \throws std::bad_alloc if no contiguous run of n free slots exists.
+    /// \throws AllocationError if no contiguous run of n free slots exists.
     void* allocate_array(std::size_t n) {
         std::lock_guard<std::mutex> lock(mutex_);
         
@@ -133,9 +148,10 @@ public:
         if (n == 1)
             return allocate_node_unlocked();
         if (free_count_ < n)
-            throw std::bad_alloc{};
+            throw AllocationError{AllocationError::Reason::PoolExhausted,
+                                  "allocate_array: insufficient free nodes"};
 
-        const std::size_t start = find_contiguous(n); // throws bad_alloc if not found
+        const std::size_t start = find_contiguous(n); // throws AllocationError if not found
 
         for (std::size_t i = 0; i < n; ++i)
             mark_used(start + i);
@@ -196,7 +212,8 @@ private:
 
     void* allocate_node_unlocked() {
         if (free_count_ == 0)
-            throw std::bad_alloc{};
+            throw AllocationError{AllocationError::Reason::PoolExhausted,
+                                  "allocate_node: pool is full"};
 
         // Find a group with a free slot via l1_.
         const std::size_t l1_word = find_set_bit_word(l1_);
@@ -329,7 +346,8 @@ private:
             }
         }
 
-        throw std::bad_alloc{};
+        throw AllocationError{AllocationError::Reason::Fragmented,
+                              "allocate_array: no contiguous run of free slots found"};
     }
 
     // Find n consecutive free slots where n > 64.
@@ -409,15 +427,17 @@ private:
             ++w;
         }
 
-        throw std::bad_alloc{};
+        throw AllocationError{AllocationError::Reason::Fragmented,
+                              "allocate_array: no contiguous run of free slots found"};
     }
 
     // -------------------------------------------------------------------------
     // Data members
     // -------------------------------------------------------------------------
 
-    std::shared_ptr<sycl::context> ctx_;             // context used for sycl::free on destruction
-    char*              slab_base_   = nullptr;        // device memory base — never dereferenced from host
+    sycl::context*      ctx_          = nullptr;         // raw pointer — lifetime guaranteed by SlabContext
+    std::weak_ptr<void> ctx_lifetime_;                   // weak to owning shared_ptr<SlabContext> (type-erased)
+    char*               slab_base_    = nullptr;         // device memory base — never dereferenced from host
     std::size_t        node_size_   = 0;
     std::size_t        slot_count_  = 0;
     std::size_t        free_count_  = 0;

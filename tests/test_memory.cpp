@@ -15,17 +15,17 @@ TEST_CASE("AllocatorRegistry is a singleton", "[memory][registry]") {
 }
 
 TEST_CASE("AllocatorRegistry pool access", "[memory][registry]") {
-    SECTION("pool(device) returns non-null shared_ptr") {
+    SECTION("pool(device) returns a usable pool") {
         auto& registry = slabkit::AllocatorRegistry::get();
-        auto pool = registry.pool(registry.device_by_index(0));
-        REQUIRE(pool != nullptr);
+        auto& pool = registry.pool(registry.device_by_index(0));
+        REQUIRE(pool.node_size() > 0);
     }
 
-    SECTION("pool(device) called twice returns the same shared_ptr (idempotent lazy init)") {
+    SECTION("pool(device) called twice returns the same pool (idempotent lazy init)") {
         auto& registry = slabkit::AllocatorRegistry::get();
-        auto pool1 = registry.pool(registry.device_by_index(0));
-        auto pool2 = registry.pool(registry.device_by_index(0));
-        REQUIRE(pool1 == pool2);
+        auto& pool1 = registry.pool(registry.device_by_index(0));
+        auto& pool2 = registry.pool(registry.device_by_index(0));
+        REQUIRE(&pool1 == &pool2);
     }
 }
 
@@ -55,24 +55,14 @@ TEST_CASE("AllocatorRegistry::Config defaults", "[memory][registry]") {
 // DeviceScratchMemory
 // =============================================================================
 
-TEST_CASE("make_scratch_memory construction", "[memory][scratch]") {
-    SECTION("make_scratch_memory(device) constructs without throwing") {
-        REQUIRE_NOTHROW([&]() {
-            auto scratch = slabkit::make_scratch_memory(slabkit::AllocatorRegistry::get().device_by_index(0));
-        }());
-    }
-
-    SECTION("make_scratch_memory(pool) constructs without throwing") {
-        auto& registry = slabkit::AllocatorRegistry::get();
-        auto pool = registry.pool(registry.device_by_index(0));
-        REQUIRE_NOTHROW([&]() {
-            auto scratch = slabkit::make_scratch_memory(pool);
-        }());
-    }
+TEST_CASE("make_scratch construction", "[memory][scratch]") {
+    REQUIRE_NOTHROW([&]() {
+        auto scratch = slabkit::make_scratch(slabkit::AllocatorRegistry::get().device_by_index(0));
+    }());
 }
 
 TEST_CASE("DeviceScratchMemory allocate and unwind", "[memory][scratch]") {
-    auto scratch = slabkit::make_scratch_memory(slabkit::AllocatorRegistry::get().device_by_index(0));
+    auto scratch = slabkit::make_scratch(slabkit::AllocatorRegistry::get().device_by_index(0));
 
     SECTION("allocate_node returns non-null pointer") {
         void* ptr = scratch.allocate(256, alignof(std::max_align_t));

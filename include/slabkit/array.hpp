@@ -11,6 +11,7 @@
 #include <sycl/sycl.hpp>
 
 #include "slabkit/memory.hpp"
+#include "slabkit/context.hpp"
 
 namespace slabkit {
 
@@ -77,11 +78,11 @@ std::size_t strided_offset(sycl::id<N> id, sycl::range<N> strides) noexcept {
 
 template <typename V, typename T, int N>
 concept DeviceViewLike = requires(V v, sycl::id<N> id) {
-    { v.data() } -> std::same_as<T*>;
     { v.get_range() } -> std::same_as<sycl::range<N>>;
-    { v.size() } -> std::convertible_to<size_t>;
+    { v.size() }      -> std::convertible_to<size_t>;
     { v.byte_size() } -> std::convertible_to<size_t>;
-    { v[id] } -> std::same_as<T&>;
+    { v[id] }         -> std::same_as<T&>;
+    // NOTE: data() NOT required — DeviceSubView may not expose contiguous data
 };
 
 // =============================================================================
@@ -159,38 +160,43 @@ struct DeviceSubView {
 };
 
 // =============================================================================
-// DeviceArray<T, N> — owning, RAII, copyable via shared_ptr
+// DeviceArray<T, N> — owning, RAII, move-only
 // =============================================================================
 
 template <typename T, int N>
 class DeviceArray {
 public:
-    // Construct from raw ptr + deleter (used by make_device_array factory)
-    DeviceArray(std::shared_ptr<T> ptr, sycl::range<N> range, size_t device_index)
-        : ptr_(std::move(ptr)), range_(range), device_index_(device_index) {}
-
-    // Copy/move — defaulted, shared_ptr handles ref counting
-    DeviceArray(const DeviceArray&)            = default;
-    DeviceArray& operator=(const DeviceArray&) = default;
+    // Move-only semantics — backed by unique_ptr with DeviceUSMPoolDeleter
+    DeviceArray(const DeviceArray&)            = delete;
+    DeviceArray& operator=(const DeviceArray&) = delete;
     DeviceArray(DeviceArray&&)                 = default;
     DeviceArray& operator=(DeviceArray&&)      = default;
 
-    T*             data() const noexcept { return ptr_.get(); }
+    T*             data() noexcept { return ptr_.get(); }
+    const T*       data() const noexcept { return ptr_.get(); }
     sycl::range<N> get_range() const noexcept { return range_; }
-    size_t         size() const noexcept { return range_.size(); }
-    size_t         byte_size() const noexcept { return size() * sizeof(T); }
+    size_t         size() const noexcept { return element_count_; }
+    size_t         byte_size() const noexcept { return element_count_ * sizeof(T); }
     size_t         device_index() const noexcept { return device_index_; }
 
-    DeviceView<T, N> view() const noexcept {
+    DeviceView<T, N> view() noexcept {
         return DeviceView<T, N>{ptr_.get(), range_};
+    }
+
+    DeviceView<const T, N> view() const noexcept {
+        return DeviceView<const T, N>{ptr_.get(), range_};
     }
 
     DeviceView<const T, N> const_view() const noexcept {
         return view();  // implicit conversion via DeviceView<const T,N>(DeviceView<T,N>)
     }
 
+    // Implicit conversion operators (so arrays can be passed where views are expected)
+    operator DeviceView<T, N>() noexcept { return view(); }
+    operator DeviceView<const T, N>() const noexcept { return view(); }
+
     DeviceSubView<T, N> subview(std::array<size_t, N> offsets,
-                                sycl::range<N> sub_range) const {
+                                sycl::range<N> sub_range) {
         // Compute parent's packed row-major strides
         sycl::range<N> strides;
         strides[N - 1] = 1;
@@ -212,25 +218,58 @@ public:
 
     DeviceSubView<const T, N> const_subview(std::array<size_t, N> offsets,
                                              sycl::range<N> sub_range) const {
-        return subview(offsets, sub_range);  // implicit conversion via DeviceSubView<const T,N>(DeviceSubView<T,N>)
+        return const_cast<DeviceArray*>(this)->subview(offsets, sub_range);
+    }
+
+    /// Factory function: allocate from a SlabContext pool
+    static DeviceArray from_pool(sycl::range<N> range,
+                                  std::shared_ptr<SlabContext> ctx,
+                                  size_t device_index) {
+        auto& pool = ctx->pool_at(device_index);
+        const size_t count = range.size();
+        const size_t node_count = (count * sizeof(T) + pool.node_size() - 1) / pool.node_size();
+        T* raw = static_cast<T*>(pool.allocate_array(node_count));
+        DeviceUSMPoolDeleter del{std::weak_ptr<SlabContext>(ctx), device_index, node_count};
+        return DeviceArray{std::unique_ptr<T, DeviceUSMPoolDeleter>{raw, std::move(del)}, range, device_index};
     }
 
 private:
-    std::shared_ptr<T> ptr_;   // shared ownership — copyable
-    sycl::range<N>     range_;
-    size_t             device_index_;
+    // Private constructor — use from_pool() or make_device_array()
+    DeviceArray(std::unique_ptr<T, DeviceUSMPoolDeleter> ptr,
+                sycl::range<N> range,
+                size_t device_index)
+        : ptr_(std::move(ptr))
+        , range_(range)
+        , element_count_(range.size())
+        , device_index_(device_index) {}
+
+    std::unique_ptr<T, DeviceUSMPoolDeleter> ptr_;
+    sycl::range<N>                           range_;
+    size_t                                   element_count_;
+    size_t                                   device_index_;
+
 };
 
 // =============================================================================
 // Factory function
 // =============================================================================
 
+/// Registry-free factory: allocate from an explicit SlabContext.
+/// Phase 2 API — use this to construct from a specific SlabContext instance.
+template <typename T, int N>
+DeviceArray<T, N> make_device_array(sycl::range<N> range,
+                                     std::shared_ptr<SlabContext> ctx,
+                                     size_t device_index) {
+    return DeviceArray<T, N>::from_pool(range, ctx, device_index);
+}
+
+/// Registry-backed factory: allocate from AllocatorRegistry's global SlabContext.
+/// Phase 3 API — now that AllocatorRegistry returns shared_ptr<SlabContext>.
 template <typename T, int N>
 DeviceArray<T, N> make_device_array(sycl::range<N> range, const sycl::device& dev) {
-    // malloc_shared_device_ptr handles pool lookup and deleter setup
-    auto ptr = malloc_shared_device_ptr<T>(dev, range.size());
-    const size_t idx = AllocatorRegistry::get().device_index(dev);
-    return DeviceArray<T, N>{std::move(ptr), range, idx};
+    auto ctx = AllocatorRegistry::context();
+    const size_t idx = ctx->device_index(dev);
+    return DeviceArray<T, N>::from_pool(range, ctx, idx);
 }
 
 // =============================================================================
@@ -485,47 +524,70 @@ void sync_to_host(DeviceSubView<const T, N> src, T* dst,
 // MirroredArray<T, N> — paired device + host storage
 // =============================================================================
 //
-// Device side is a DeviceArray (now copyable via shared_ptr).
-// Host side is std::vector<T> (deep copy on copy — intentional, two independent
-// host buffers sharing device memory would be a footgun).
+// Device side is a DeviceArray (now move-only).
+// Host side is std::vector<T>.
+// MirroredArray is move-only (DeviceArray is move-only).
 //
 
 template <typename T, int N>
 class MirroredArray {
-    DeviceArray<T, N> device_;
-    std::vector<T>    host_;
+    std::shared_ptr<SlabContext> ctx_;     // needed for clone()
+    size_t                       device_idx_;
+    DeviceArray<T, N>            device_;
+    std::vector<T>               host_;
 
 public:
-    MirroredArray(sycl::range<N> range, size_t device_index)
-        : device_(make_device_array<T, N>(
-              range, AllocatorRegistry::get().device_by_index(device_index))),
-          host_(range.size()) {}
+    /// Registry-free constructor: takes explicit SlabContext and device index.
+    /// Phase 2 API — matches DeviceArray changes.
+    MirroredArray(sycl::range<N> range,
+                  std::shared_ptr<SlabContext> ctx,
+                  size_t device_index)
+        : ctx_(ctx)
+        , device_idx_(device_index)
+        , device_(DeviceArray<T, N>::from_pool(range, ctx, device_index))
+        , host_(range.size()) {}
 
-    // Copy: device side is shared (shared_ptr), host side is deep copied
-    // Two independent host buffers sharing the same device allocation
-    MirroredArray(const MirroredArray&)            = default;
-    MirroredArray& operator=(const MirroredArray&) = default;
+    /// Registry-backed constructor: allocates from AllocatorRegistry's global SlabContext.
+    /// Phase 3 API — now that AllocatorRegistry returns shared_ptr<SlabContext>.
+    MirroredArray(sycl::range<N> range, const sycl::device& dev)
+        : MirroredArray(range, AllocatorRegistry::context(),
+                        AllocatorRegistry::context()->device_index(dev)) {}
+
+    // Move-only: DeviceArray is move-only
+    MirroredArray(const MirroredArray&)            = delete;
+    MirroredArray& operator=(const MirroredArray&) = delete;
     MirroredArray(MirroredArray&&)                 = default;
     MirroredArray& operator=(MirroredArray&&)      = default;
 
-    DeviceView<T, N> view() const noexcept { return device_.view(); }
+    /// Create a deep copy: re-allocates a new device array (uninitialized).
+    /// Host memory is cloned. Caller must use sync_to_device to populate device side.
+    MirroredArray clone() const {
+        MirroredArray result{device_.get_range(), ctx_, device_idx_};
+        result.host_ = host_;  // deep copy of host vector
+        return result;
+    }
+
+    DeviceView<T, N> view() noexcept {
+        return device_.view();
+    }
+
+    DeviceView<const T, N> view() const noexcept {
+        return device_.view();
+    }
 
     DeviceView<const T, N> const_view() const noexcept {
-        return device_.const_view();
+        return device_.view();
     }
 
     DeviceSubView<T, N> subview(std::array<size_t, N> offsets,
-                                sycl::range<N> sub_range) const {
+                                sycl::range<N> sub_range) {
         return device_.subview(offsets, sub_range);
     }
 
     DeviceSubView<const T, N> const_subview(std::array<size_t, N> offsets,
-                                            sycl::range<N> sub_range) const {
+                                             sycl::range<N> sub_range) const {
         return device_.const_subview(offsets, sub_range);
     }
-
-    const DeviceArray<T, N>& device_array() const noexcept { return device_; }
-    DeviceArray<T, N>&       device_array() noexcept { return device_; }
 
     std::span<T>       host_data() noexcept { return host_; }
     std::span<const T> host_data() const noexcept { return host_; }
@@ -537,12 +599,12 @@ public:
 
     sycl::event sync_to_host(sycl::queue& q,
                              const std::vector<sycl::event>& deps = {}) {
-        return copy_to_host(device_, host_.data(), q, deps);
+        return copy_to_host(device_.view(), host_.data(), q, deps);
     }
 
     sycl::event sync_to_device(sycl::queue& q,
                                const std::vector<sycl::event>& deps = {}) {
-        return copy_to_device(host_.data(), device_, q, deps);
+        return copy_to_device(host_.data(), device_.view(), q, deps);
     }
 };
 

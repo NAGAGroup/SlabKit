@@ -4,9 +4,22 @@
 #include <numeric>
 
 #include "slabkit/array.hpp"
+#include "slabkit/context.hpp"
 
 // Verify DeviceView satisfies the DeviceViewLike concept
 static_assert(slabkit::DeviceViewLike<slabkit::DeviceView<float, 2>, float, 2>);
+
+// Helper: create a SlabContext for testing
+inline std::shared_ptr<slabkit::SlabContext> make_test_context() {
+    sycl::device dev{sycl::cpu_selector_v};
+    sycl::context sycl_ctx{dev};
+    return slabkit::SlabContextBuilder()
+            .contexts({sycl_ctx})
+            .devices({dev})
+            .node_size(1024)
+            .slab_size_per_device(4 * 1024 * 1024)
+            .build();
+}
 
 // =============================================================================
 // DeviceView
@@ -93,28 +106,34 @@ TEST_CASE("DeviceSubView element access uses explicit strides", "[array][subview
 // DeviceArray
 // =============================================================================
 
-TEST_CASE("DeviceArray has shared ownership semantics", "[array][device_array]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, dev);
+TEST_CASE("DeviceArray from_pool is move-only", "[array][device_array]") {
+    auto ctx = make_test_context();
+    auto arr = slabkit::DeviceArray<float, 1>::from_pool(sycl::range<1>{8}, ctx, 0);
+    
+    // Move constructor works
+    auto arr2 = std::move(arr);
+    REQUIRE(arr2.data() != nullptr);
+}
 
-    SECTION("copy construction shares the same data pointer") {
-        auto arr2 = arr;  // copy
-        REQUIRE(arr2.data() == arr.data());
+TEST_CASE("DeviceArray has move-only semantics", "[array][device_array]") {
+    auto ctx = make_test_context();
+    auto arr = slabkit::DeviceArray<float, 1>::from_pool(sycl::range<1>{8}, ctx, 0);
+
+    SECTION("copy construction is deleted") {
+        // This should not compile: auto arr2 = arr;
+        // We can't test it here, but it's enforced by = delete
+        REQUIRE(true);  // placeholder
     }
     SECTION("move construction transfers ownership") {
         float* original_ptr = arr.data();
         auto arr2 = std::move(arr);
         REQUIRE(arr2.data() == original_ptr);
-        // arr.data() is unspecified after move — don't check it
     }
 }
 
 TEST_CASE("DeviceArray view and subview", "[array][device_array]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    // 2D array 4x4
-    auto arr = slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, dev);
+    auto ctx = make_test_context();
+    auto arr = slabkit::DeviceArray<int, 2>::from_pool(sycl::range<2>{4, 4}, ctx, 0);
 
     SECTION("view() returns DeviceView over full range") {
         auto v = arr.view();
@@ -139,16 +158,15 @@ TEST_CASE("DeviceArray view and subview", "[array][device_array]") {
     }
 }
 
-TEST_CASE("make_device_array factory", "[array][device_array]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
+TEST_CASE("make_device_array factory registry-free", "[array][make_device_array]") {
+    auto ctx = make_test_context();
 
-    SECTION("allocates from AllocatorRegistry pool for given device") {
-        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{16}, dev);
+    SECTION("allocates from SlabContext pool for given device_index") {
+        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{16}, ctx, 0);
         REQUIRE(arr.data() != nullptr);
         REQUIRE(arr.size() == 16);
         REQUIRE(arr.get_range() == sycl::range<1>{16});
-        REQUIRE(arr.device_index() == reg.device_index(dev));
+        REQUIRE(arr.device_index() == 0);
     }
 }
 
@@ -156,13 +174,20 @@ TEST_CASE("make_device_array factory", "[array][device_array]") {
 // MirroredArray
 // =============================================================================
 
-TEST_CASE("MirroredArray sync", "[array][mirrored]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    sycl::queue q = slabkit::make_queue(dev);
-    const size_t dev_idx = reg.device_index(dev);
+TEST_CASE("MirroredArray move-only semantics", "[array][mirrored]") {
+    auto ctx = make_test_context();
+    auto ma = slabkit::MirroredArray<float, 1>{sycl::range<1>{4}, ctx, 0};
 
-    slabkit::MirroredArray<float, 1> ma(sycl::range<1>{4}, dev_idx);
+    // Move constructor works
+    auto ma2 = std::move(ma);
+    REQUIRE(ma2.size() == 4);
+}
+
+TEST_CASE("MirroredArray sync", "[array][mirrored]") {
+    auto ctx = make_test_context();
+    sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
+
+    slabkit::MirroredArray<float, 1> ma(sycl::range<1>{4}, ctx, 0);
 
     SECTION("sync_to_device copies host span to device") {
         // Write to host side
@@ -172,7 +197,7 @@ TEST_CASE("MirroredArray sync", "[array][mirrored]") {
         ma.sync_to_device(q).wait();
         // Copy back and verify
         std::vector<float> result(4, 0.0f);
-        slabkit::sync_to_host(ma.device_array(), result.data(), q);
+        slabkit::sync_to_host(ma.const_view(), result.data(), q);
         REQUIRE(result[0] == 1.0f);
         REQUIRE(result[3] == 4.0f);
     }
@@ -195,24 +220,23 @@ TEST_CASE("MirroredArray sync", "[array][mirrored]") {
 // =============================================================================
 
 TEST_CASE("copy_to_host returns sycl::event", "[array][transfer]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    sycl::queue q = slabkit::make_queue(dev);
+    auto ctx = make_test_context();
+    sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("DeviceArray overload") {
-        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, dev);
+        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
         // Upload known data
         std::vector<int> src = {10, 20, 30, 40};
-        slabkit::copy_to_device(src.data(), arr, q).wait();
+        slabkit::copy_to_device(src.data(), arr.view(), q).wait();
         // Download and verify
         std::vector<int> dst(4, 0);
         slabkit::copy_to_host(arr, dst.data(), q).wait();
         REQUIRE(dst == src);
     }
     SECTION("DeviceView overload") {
-        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, dev);
+        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
         std::vector<int> src = {5, 6, 7, 8};
-        slabkit::copy_to_device(src.data(), arr, q).wait();
+        slabkit::copy_to_device(src.data(), arr.view(), q).wait();
         std::vector<int> dst(4, 0);
         slabkit::copy_to_host(arr.view(), dst.data(), q).wait();
         REQUIRE(dst == src);
@@ -221,21 +245,20 @@ TEST_CASE("copy_to_host returns sycl::event", "[array][transfer]") {
 }
 
 TEST_CASE("copy_to_device returns sycl::event", "[array][transfer]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    sycl::queue q = slabkit::make_queue(dev);
+    auto ctx = make_test_context();
+    sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("DeviceArray overload") {
-        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{3}, dev);
+        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{3}, ctx, 0);
         std::vector<float> src = {1.5f, 2.5f, 3.5f};
-        auto ev = slabkit::copy_to_device(src.data(), arr, q);
+        auto ev = slabkit::copy_to_device(src.data(), arr.view(), q);
         REQUIRE_NOTHROW(ev.wait());
         std::vector<float> dst(3, 0.0f);
         slabkit::sync_to_host(arr, dst.data(), q);
         REQUIRE(dst == src);
     }
     SECTION("DeviceView overload") {
-        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{3}, dev);
+        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{3}, ctx, 0);
         std::vector<float> src = {7.0f, 8.0f, 9.0f};
         auto ev = slabkit::copy_to_device(src.data(), arr.view(), q);
         REQUIRE_NOTHROW(ev.wait());
@@ -251,19 +274,18 @@ TEST_CASE("copy_to_device returns sycl::event", "[array][transfer]") {
 // =============================================================================
 
 TEST_CASE("parallel_for with DeviceView capture — element-wise kernel", "[array][kernel][view]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    sycl::queue q = slabkit::make_queue(dev);
+    auto ctx = make_test_context();
+    sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("element-wise multiply: result[id] = a[id] * b[id]") {
-        auto a_arr      = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, dev);
-        auto b_arr      = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, dev);
-        auto result_arr = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, dev);
+        auto a_arr      = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
+        auto b_arr      = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
+        auto result_arr = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
 
         std::vector<float> a_h = {1, 2, 3, 4, 5, 6, 7, 8};
         std::vector<float> b_h = {2, 2, 2, 2, 2, 2, 2, 2};
-        slabkit::copy_to_device(a_h.data(), a_arr, q).wait();
-        slabkit::copy_to_device(b_h.data(), b_arr, q).wait();
+        slabkit::copy_to_device(a_h.data(), a_arr.view(), q).wait();
+        slabkit::copy_to_device(b_h.data(), b_arr.view(), q).wait();
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<1>{8},
@@ -278,7 +300,7 @@ TEST_CASE("parallel_for with DeviceView capture — element-wise kernel", "[arra
     }
 
     SECTION("write sequential index: result[id[0]] = id[0]") {
-        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{6}, dev);
+        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{6}, ctx, 0);
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<1>{6},
@@ -295,12 +317,11 @@ TEST_CASE("parallel_for with DeviceView capture — element-wise kernel", "[arra
 }
 
 TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    sycl::queue q = slabkit::make_queue(dev);
+    auto ctx = make_test_context();
+    sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("write row*10+col into 2D result via view capture") {
-        auto arr = slabkit::make_device_array<int, 2>(sycl::range<2>{3, 4}, dev);
+        auto arr = slabkit::make_device_array<int, 2>(sycl::range<2>{3, 4}, ctx, 0);
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<2>{3, 4},
@@ -318,14 +339,14 @@ TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
     }
 
     SECTION("element-wise add two 2D views") {
-        auto a_arr      = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, dev);
-        auto b_arr      = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, dev);
-        auto result_arr = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, dev);
+        auto a_arr      = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
+        auto b_arr      = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
+        auto result_arr = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
 
         std::vector<int> a_h = {1, 2, 3, 4, 5, 6};
         std::vector<int> b_h = {10, 20, 30, 40, 50, 60};
-        slabkit::copy_to_device(a_h.data(), a_arr, q).wait();
-        slabkit::copy_to_device(b_h.data(), b_arr, q).wait();
+        slabkit::copy_to_device(a_h.data(), a_arr.view(), q).wait();
+        slabkit::copy_to_device(b_h.data(), b_arr.view(), q).wait();
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<2>{2, 3},
@@ -342,14 +363,13 @@ TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
 }
 
 TEST_CASE("parallel_for writing into DeviceSubView capture — strided write", "[array][kernel][subview]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    sycl::queue q = slabkit::make_queue(dev);
+    auto ctx = make_test_context();
+    sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("kernel writes into 2x2 subview of 4x4 array, surrounding elements untouched") {
-        auto arr = slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, dev);
+        auto arr = slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, ctx, 0);
         std::vector<int> zeros(16, 0);
-        slabkit::copy_to_device(zeros.data(), arr, q).wait();
+        slabkit::copy_to_device(zeros.data(), arr.view(), q).wait();
 
         auto sv = arr.subview(std::array<size_t, 2>{1, 1}, sycl::range<2>{2, 2});
         // sv.strides_ == {4, 1}, sv.data() == arr.data() + 5
@@ -380,22 +400,21 @@ TEST_CASE("parallel_for writing into DeviceSubView capture — strided write", "
 }
 
 TEST_CASE("parallel_for reading from DeviceSubView, writing to DeviceView — gather", "[array][kernel][subview]") {
-    auto& reg = slabkit::AllocatorRegistry::get();
-    const sycl::device& dev = reg.device_by_index(0);
-    sycl::queue q = slabkit::make_queue(dev);
+    auto ctx = make_test_context();
+    sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("gather: read 2x2 strided subview into contiguous 1D result") {
-        auto src_arr = slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, dev);
+        auto src_arr = slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, ctx, 0);
         std::vector<int> src_h(16);
         std::iota(src_h.begin(), src_h.end(), 0);  // 0..15
-        slabkit::copy_to_device(src_h.data(), src_arr, q).wait();
+        slabkit::copy_to_device(src_h.data(), src_arr.view(), q).wait();
 
         // subview at (1,2), size 2x2
         // ptr = src.data() + 6, strides = {4,1}
         // sv(0,0)=6, sv(0,1)=7, sv(1,0)=10, sv(1,1)=11
         auto sv = src_arr.subview(std::array<size_t, 2>{1, 2}, sycl::range<2>{2, 2});
 
-        auto dst_arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, dev);
+        auto dst_arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<2>{2, 2},

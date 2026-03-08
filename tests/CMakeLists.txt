@@ -10,6 +10,10 @@ endfunction()
 add_sycl_executable(slabkit_tests
     test_memory.cpp
     test_array.cpp
+    test_context_array.cpp
+    test_context.cpp
+    test_api.cpp
+    test_transfers.cpp
 )
 
 

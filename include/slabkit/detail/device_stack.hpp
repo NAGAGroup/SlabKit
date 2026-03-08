@@ -27,6 +27,7 @@
 #include <new>
 #include <stdexcept>
 
+#include "slabkit/error.hpp"
 #include "slabkit/detail/device_pool.hpp"
 
 namespace slabkit {
@@ -64,8 +65,8 @@ public:
     /// The allocation is returned to the pool automatically when this object is destroyed.
     /// \param pool         Shared pool to allocate from. Kept alive by this object.
     /// \param scratch_size Number of bytes to allocate (rounded up to node granularity).
-    DeviceScratchMemory(std::shared_ptr<DeviceMemoryPool> pool, std::size_t scratch_size)
-        : pool_{std::move(pool)}
+    DeviceScratchMemory(DeviceMemoryPool* pool, std::size_t scratch_size)
+        : pool_{pool}
         , node_count_{(scratch_size + pool_->node_size() - 1) / pool_->node_size()}
         , slab_base_{static_cast<std::byte*>(pool_->allocate_array(node_count_))}
         , capacity_{node_count_ * pool_->node_size()}
@@ -77,7 +78,7 @@ public:
 
     DeviceScratchMemory(const DeviceScratchMemory&)            = delete;
     DeviceScratchMemory& operator=(const DeviceScratchMemory&) = delete;
-    
+
     DeviceScratchMemory(DeviceScratchMemory&& other) noexcept
         : pool_{std::move(other.pool_)}
         , node_count_{other.node_count_}
@@ -115,7 +116,7 @@ public:
 
     /// Allocates 'size' bytes aligned to 'alignment' (must be power of two).
     /// Returns device pointer (opaque — do not dereference from host).
-    /// \throws std::bad_alloc if not enough space.
+    /// \throws AllocationError if not enough space.
     void* allocate(std::size_t size,
                    std::size_t alignment = alignof(std::max_align_t)) {
         assert(size > 0);
@@ -126,7 +127,8 @@ public:
 
         // Check for overflow and capacity.
         if (aligned_offset + size > capacity_)
-            throw std::bad_alloc{};
+            throw AllocationError{AllocationError::Reason::ScratchFull,
+                                  "scratch allocator capacity exceeded"};
 
         void* result = static_cast<void*>(slab_base_ + aligned_offset);
         offset_      = aligned_offset + size;
@@ -195,7 +197,7 @@ private:
     // Data members
     // -------------------------------------------------------------------------
 
-    std::shared_ptr<DeviceMemoryPool> pool_;                   // non-null iff pool-owned
+    DeviceMemoryPool* pool_;                   // non-null iff pool-owned
     std::size_t                       node_count_  = 0;        // slots allocated from pool_
     std::byte*                        slab_base_   = nullptr;  // device memory base — never dereferenced from host
     std::size_t                       capacity_    = 0;        // total slab size in bytes
