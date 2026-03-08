@@ -195,30 +195,37 @@ public:
     operator DeviceView<T, N>() noexcept { return view(); }
     operator DeviceView<const T, N>() const noexcept { return view(); }
 
-    DeviceSubView<T, N> subview(std::array<size_t, N> offsets,
-                                sycl::range<N> sub_range) {
-        // Compute parent's packed row-major strides
+private:
+    // Shared const helper — computes strides, offset, performs bounds check.
+    DeviceSubView<const T, N> subview_impl(std::array<size_t, N> offsets,
+                                            sycl::range<N> sub_range) const {
         sycl::range<N> strides;
         strides[N - 1] = 1;
         for (int d = N - 2; d >= 0; --d)
             strides[d] = strides[d + 1] * range_[d + 1];
 
-        // Compute linear offset for base pointer
         size_t linear_offset = 0;
         for (int d = 0; d < N; ++d)
             linear_offset += offsets[d] * strides[d];
 
-        // Bounds check
         for (int d = 0; d < N; ++d)
             assert(offsets[d] + sub_range[d] <= range_[d] &&
                    "subview exceeds array bounds");
 
-        return DeviceSubView<T, N>{ptr_.get() + linear_offset, sub_range, strides};
+        return DeviceSubView<const T, N>{ptr_.get() + linear_offset, sub_range, strides};
+    }
+
+public:
+    DeviceSubView<T, N> subview(std::array<size_t, N> offsets,
+                                sycl::range<N> sub_range) {
+        auto sv = subview_impl(offsets, sub_range);
+        // Re-wrap as mutable — safe because this is a non-const method
+        return DeviceSubView<T, N>{const_cast<T*>(sv.ptr_), sv.range_, sv.strides_};
     }
 
     DeviceSubView<const T, N> const_subview(std::array<size_t, N> offsets,
                                              sycl::range<N> sub_range) const {
-        return const_cast<DeviceArray*>(this)->subview(offsets, sub_range);
+        return subview_impl(offsets, sub_range);
     }
 
     /// Factory function: allocate from a SlabContext pool

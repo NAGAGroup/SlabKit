@@ -80,7 +80,7 @@ public:
     DeviceScratchMemory& operator=(const DeviceScratchMemory&) = delete;
 
     DeviceScratchMemory(DeviceScratchMemory&& other) noexcept
-        : pool_{std::move(other.pool_)}
+        : pool_{other.pool_}
         , node_count_{other.node_count_}
         , slab_base_{other.slab_base_}
         , capacity_{other.capacity_}
@@ -94,7 +94,7 @@ public:
         if (this != &other) {
             if (pool_ && slab_base_)
                 pool_->deallocate_array(slab_base_, node_count_);
-            pool_       = std::move(other.pool_);
+            pool_       = other.pool_;
             node_count_ = other.node_count_;
             slab_base_  = other.slab_base_;
             capacity_   = other.capacity_;

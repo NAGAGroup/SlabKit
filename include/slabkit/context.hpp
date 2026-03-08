@@ -35,7 +35,7 @@ struct SlabContext : std::enable_shared_from_this<SlabContext> {
     std::vector<sycl::device>                      devices;
     std::vector<size_t>                            device_to_platform;
     std::vector<size_t>                            device_slab_sizes;
-    std::vector<std::unique_ptr<DeviceMemoryPool>> pools;
+    mutable std::vector<std::unique_ptr<DeviceMemoryPool>> pools;
 
     // Private config and synchronization
     size_t              node_size_ = 1024;
@@ -67,7 +67,7 @@ struct SlabContext : std::enable_shared_from_this<SlabContext> {
         if (idx >= pools.size())
             throw std::out_of_range("slabkit: device index out of range");
 
-        {
+        if (!pools[idx]) {
             std::lock_guard<std::mutex> lk(pool_mutex_);
             if (!pools[idx]) {
                 size_t plat_idx = device_to_platform[idx];
@@ -84,6 +84,8 @@ struct SlabContext : std::enable_shared_from_this<SlabContext> {
     }
 
     /// Const version of pool_at — lazy init is logically non-mutating (idempotent).
+    /// Delegates to mutable overload via const_cast: safe because pools and pool_mutex_
+    /// are mutable, so no const object is modified.
     const DeviceMemoryPool& pool_at(size_t idx) const {
         return const_cast<SlabContext*>(this)->pool_at(idx);
     }

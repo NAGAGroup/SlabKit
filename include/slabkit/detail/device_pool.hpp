@@ -330,7 +330,6 @@ private:
                     std::countl_one(l0_[w]));        // free at high end of word w
 
                 if (tail_free == 0) {
-                    ++w;
                     continue;
                 }
 

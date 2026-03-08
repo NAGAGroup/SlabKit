@@ -7,8 +7,17 @@
 #include "slabkit/scratch.hpp"
 
 // =============================================================================
-// Phase 3 API Tests
+// Registry Integration Tests
 // =============================================================================
+//
+// These tests exercise the AllocatorRegistry-backed API path directly.
+// This is intentional: they test that the registry correctly initialises,
+// wires up SlabContext, and exposes the right device/queue/memory surfaces.
+//
+// Per design spec, unit tests for DeviceArray, DeviceScratchMemory, and
+// MirroredArray should use SlabContextBuilder directly (see test_context.cpp,
+// test_context_array.cpp). The registry path is tested here only.
+//
 
 // =============================================================================
 // Queue factories with new names
