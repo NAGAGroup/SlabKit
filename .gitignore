@@ -1,5 +1,5 @@
 .opencode/**
 build/
 neovim.json
-.tmp/
+.tmp/**
 .cache/
