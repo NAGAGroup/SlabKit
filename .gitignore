@@ -2,3 +2,6 @@ build/
 neovim.json
 .tmp/**
 .cache/
+
+.opencode/inbox
+.opencode/session-ids
