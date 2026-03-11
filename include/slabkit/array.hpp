@@ -12,6 +12,7 @@
 
 #include "slabkit/memory.hpp"
 #include "slabkit/context.hpp"
+#include "slabkit/scratch.hpp"
 
 namespace slabkit {
 
