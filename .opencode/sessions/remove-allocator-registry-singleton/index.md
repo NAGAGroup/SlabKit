@@ -6,15 +6,15 @@
 
 ## Done Criteria
 
-- [ ] `AllocatorRegistry` class deleted entirely (no `get()`, no `Config`, no singleton)
-- [ ] `SlabContext` renamed to `SlabKitContext` across all headers and tests
-- [ ] `SlabContextBuilder` renamed to `SlabKitContextBuilder`; builder accepts only `devices(...)` — sycl::context is auto-created per platform group
-- [ ] All public factory free functions require an explicit `SlabKitContext` parameter — no registry-backed overloads remain
-- [ ] `sycl::device` overloads added to free factory functions (`malloc_device`, `make_device_array`, `make_scratch`)
-- [ ] Lazy pool creation for pre-registered devices preserved (unchanged behaviour, just confirmed)
-- [ ] All 6 test files updated and compiling
-- [ ] `pixi run test dev` passes with zero failures
-- [ ] Design doc updated to reflect new architecture
+- [x] `AllocatorRegistry` class deleted entirely (no `get()`, no `Config`, no singleton)
+- [x] `SlabContext` renamed to `Context` across all headers and tests
+- [x] `SlabContextBuilder` renamed to `ContextBuilder`; builder accepts only `devices(...)` — sycl::context is auto-created per platform group
+- [x] All public factory free functions require an explicit `Context` parameter — no registry-backed overloads remain
+- [x] `sycl::device` overloads added to free factory functions (`malloc_device`, `make_device_array`, `make_scratch`)
+- [x] Lazy pool creation for pre-registered devices preserved (unchanged behaviour, just confirmed)
+- [x] All 6 test files updated and compiling
+- [x] `pixi run test dev` passes with zero failures
+- [x] Design doc updated to reflect new architecture
 
 ---
 
@@ -29,7 +29,7 @@
 | G1 | ✅ complete | Review API shape before test rewrite |
 | 05 | ✅ complete | Update all 6 test files for new API — **CodeWriter / standard** |
 | 06 | ✅ complete | Build & test — **HeadWrench** |
-| 07 | ▶️ in_progress | Update `docs/design/slabkit-v0.1-design.md` — **DocWriter / fast** |
+| 07 | ✅ complete | Update `docs/design/slabkit-v0.1-design.md` — **DocWriter / fast** |
 
 ---
 
@@ -51,9 +51,9 @@
 
 ## Current Focus
 
-**Status:** In progress — subtasks 01–06 complete, G1 complete. Now updating design doc (subtask 07).
+**Status:** ✅ Complete — all 7 subtasks done. Session `remove-allocator-registry-singleton` finished 2026-03-10.
 
-**Next:** Final commit after docs update.
+**Final commit:** `docs: update slabkit-v0.1-design.md to reflect post-refactor architecture`
 
 ---
 

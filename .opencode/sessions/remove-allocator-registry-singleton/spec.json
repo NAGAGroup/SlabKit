@@ -2,8 +2,8 @@
   "name": "remove-allocator-registry-singleton",
   "goal": "Remove the AllocatorRegistry singleton, rename SlabContext to SlabKitContext with an auto-context builder, add sycl::device-based factory methods, and enforce explicit context ownership throughout the library.",
   "created": "2026-03-10",
-  "status": "in_progress",
-  "currentSubtask": 6,
+  "status": "completed",
+  "currentSubtask": 7,
   "subtaskCount": 7,
   "architectEnabled": false,
   "circuitBreakerThreshold": 3,
@@ -54,7 +54,7 @@
       "id": "07",
       "name": "docs",
       "description": "Update docs/design/slabkit-v0.1-design.md to reflect new architecture",
-      "status": "in_progress"
+      "status": "completed"
     }
   ]
 }
