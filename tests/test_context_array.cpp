@@ -5,12 +5,10 @@
 #include "slabkit/array.hpp"
 #include "slabkit/context.hpp"
 
-// Helper: create a SlabContext for testing
-inline std::shared_ptr<slabkit::SlabContext> make_test_context() {
+// Helper: create a Context for testing
+inline std::shared_ptr<slabkit::Context> make_test_context() {
     sycl::device dev{sycl::cpu_selector_v};
-    sycl::context sycl_ctx{dev};
-    return slabkit::SlabContextBuilder()
-            .contexts({sycl_ctx})
+    return slabkit::ContextBuilder()
             .devices({dev})
             .node_size(1024)
             .slab_size_per_device(4 * 1024 * 1024)
@@ -18,7 +16,7 @@ inline std::shared_ptr<slabkit::SlabContext> make_test_context() {
 }
 
 // =============================================================================
-// DeviceArray Phase 2 tests
+// DeviceArray tests
 // =============================================================================
 
 TEST_CASE("DeviceArray from_pool move-only construction", "[array][device_array]") {
@@ -82,7 +80,7 @@ TEST_CASE("DeviceArray implicit conversion to DeviceView", "[array][device_array
 }
 
 // =============================================================================
-// MirroredArray Phase 2 tests
+// MirroredArray tests
 // =============================================================================
 
 TEST_CASE("MirroredArray move-only semantics", "[array][mirrored_array]") {

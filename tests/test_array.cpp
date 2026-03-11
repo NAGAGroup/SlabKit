@@ -9,12 +9,10 @@
 // Verify DeviceView satisfies the DeviceViewLike concept
 static_assert(slabkit::DeviceViewLike<slabkit::DeviceView<float, 2>, float, 2>);
 
-// Helper: create a SlabContext for testing
-inline std::shared_ptr<slabkit::SlabContext> make_test_context() {
+// Helper: create a Context for testing
+inline std::shared_ptr<slabkit::Context> make_test_context() {
     sycl::device dev{sycl::cpu_selector_v};
-    sycl::context sycl_ctx{dev};
-    return slabkit::SlabContextBuilder()
-            .contexts({sycl_ctx})
+    return slabkit::ContextBuilder()
             .devices({dev})
             .node_size(1024)
             .slab_size_per_device(4 * 1024 * 1024)
@@ -161,7 +159,7 @@ TEST_CASE("DeviceArray view and subview", "[array][device_array]") {
 TEST_CASE("make_device_array factory registry-free", "[array][make_device_array]") {
     auto ctx = make_test_context();
 
-    SECTION("allocates from SlabContext pool for given device_index") {
+    SECTION("allocates from Context pool for given device_index") {
         auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{16}, ctx, 0);
         REQUIRE(arr.data() != nullptr);
         REQUIRE(arr.size() == 16);

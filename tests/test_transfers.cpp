@@ -9,14 +9,12 @@
 #include "slabkit/scratch.hpp"
 
 // ============================================================================
-// Fixture: Create SlabContext for testing
+// Fixture: Create Context for testing
 // ============================================================================
 
-inline std::shared_ptr<slabkit::SlabContext> make_test_context() {
+inline std::shared_ptr<slabkit::Context> make_test_context() {
     sycl::device dev{sycl::cpu_selector_v};
-    sycl::context sycl_ctx{dev};
-    return slabkit::SlabContextBuilder()
-            .contexts({sycl_ctx})
+    return slabkit::ContextBuilder()
             .devices({dev})
             .node_size(256)
             .slab_size_per_device(8 * 1024 * 1024)

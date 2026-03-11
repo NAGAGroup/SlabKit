@@ -45,21 +45,17 @@ TEST_CASE("AllocationError what() returns non-empty string", "[context][error]")
 }
 
 // =============================================================================
-// SlabContextBuilder and SlabContext integration
+// ContextBuilder and Context integration
 // =============================================================================
 
-TEST_CASE("SlabContextBuilder builds valid context for CPU device", "[context][builder]") {
+TEST_CASE("ContextBuilder builds valid context for CPU device", "[context][builder]") {
     SECTION("single CPU device") {
         sycl::device dev{sycl::cpu_selector_v};
-        sycl::context sycl_ctx{dev};
-
-        auto ctx = slabkit::SlabContextBuilder()
-                       .contexts({sycl_ctx})
+        auto ctx = slabkit::ContextBuilder()
                        .devices({dev})
                        .node_size(256)
                        .slab_size_per_device(1024 * 1024)
                        .build();
-
         REQUIRE(ctx->devices.size() == 1);
         REQUIRE(ctx->platform_contexts.size() == 1);
         REQUIRE(ctx->device_to_platform.size() == 1);
@@ -69,14 +65,10 @@ TEST_CASE("SlabContextBuilder builds valid context for CPU device", "[context][b
     }
 }
 
-TEST_CASE("SlabContextBuilder throws if device not covered by any context",
-          "[context][builder]") {
-    SECTION("empty context list with non-empty device list") {
-        sycl::device dev{sycl::cpu_selector_v};
-
-        REQUIRE_THROWS_AS(slabkit::SlabContextBuilder()
-                              .contexts({})
-                              .devices({dev})
+TEST_CASE("ContextBuilder throws if device list is empty", "[context][builder]") {
+    SECTION("empty device list throws std::invalid_argument") {
+        REQUIRE_THROWS_AS(slabkit::ContextBuilder()
+                              .devices({})
                               .slab_size_per_device(1024 * 1024)
                               .build(),
                           std::invalid_argument);
@@ -84,16 +76,14 @@ TEST_CASE("SlabContextBuilder throws if device not covered by any context",
 }
 
 // =============================================================================
-// SlabContext device_index lookup
+// Context device_index lookup
 // =============================================================================
 
-TEST_CASE("SlabContext device_index lookup", "[context][slab_context]") {
+TEST_CASE("Context device_index lookup", "[context][slab_context]") {
     SECTION("finds registered device by exact match") {
         sycl::device dev{sycl::cpu_selector_v};
-        sycl::context sycl_ctx{dev};
 
-        auto ctx = slabkit::SlabContextBuilder()
-                       .contexts({sycl_ctx})
+        auto ctx = slabkit::ContextBuilder()
                        .devices({dev})
                        .slab_size_per_device(1024 * 1024)
                        .build();
@@ -103,13 +93,11 @@ TEST_CASE("SlabContext device_index lookup", "[context][slab_context]") {
     }
 }
 
-TEST_CASE("SlabContext device_index throws for unknown device", "[context][slab_context]") {
+TEST_CASE("Context device_index throws for unknown device", "[context][slab_context]") {
     SECTION("pool_at throws out_of_range for invalid index") {
         sycl::device dev{sycl::cpu_selector_v};
-        sycl::context sycl_ctx{dev};
 
-        auto ctx = slabkit::SlabContextBuilder()
-                       .contexts({sycl_ctx})
+        auto ctx = slabkit::ContextBuilder()
                        .devices({dev})
                        .slab_size_per_device(1024 * 1024)
                        .build();
@@ -121,16 +109,14 @@ TEST_CASE("SlabContext device_index throws for unknown device", "[context][slab_
 }
 
 // =============================================================================
-// SlabContext pool_at and pool_for
+// Context pool_at and pool_for
 // =============================================================================
 
-TEST_CASE("SlabContext pool_at same index returns same pool", "[context][slab_context]") {
+TEST_CASE("Context pool_at same index returns same pool", "[context][slab_context]") {
     SECTION("accessing same pool twice returns same reference") {
         sycl::device dev{sycl::cpu_selector_v};
-        sycl::context sycl_ctx{dev};
 
-        auto ctx = slabkit::SlabContextBuilder()
-                       .contexts({sycl_ctx})
+        auto ctx = slabkit::ContextBuilder()
                        .devices({dev})
                        .node_size(256)
                        .slab_size_per_device(1024 * 1024)
@@ -142,13 +128,11 @@ TEST_CASE("SlabContext pool_at same index returns same pool", "[context][slab_co
     }
 }
 
-TEST_CASE("SlabContext pool_for lazily initialises pool", "[context][slab_context]") {
+TEST_CASE("Context pool_for lazily initialises pool", "[context][slab_context]") {
     SECTION("first call to pool_for initialises; second returns same") {
         sycl::device dev{sycl::cpu_selector_v};
-        sycl::context sycl_ctx{dev};
 
-        auto ctx = slabkit::SlabContextBuilder()
-                       .contexts({sycl_ctx})
+        auto ctx = slabkit::ContextBuilder()
                        .devices({dev})
                        .node_size(256)
                        .slab_size_per_device(1024 * 1024)
@@ -161,16 +145,14 @@ TEST_CASE("SlabContext pool_for lazily initialises pool", "[context][slab_contex
 }
 
 // =============================================================================
-// SlabContext context_for
+// Context context_for
 // =============================================================================
 
-TEST_CASE("SlabContext context_for returns correct platform context", "[context][slab_context]") {
+TEST_CASE("Context context_for returns correct platform context", "[context][slab_context]") {
     SECTION("by device index") {
         sycl::device dev{sycl::cpu_selector_v};
-        sycl::context sycl_ctx{dev};
 
-        auto ctx = slabkit::SlabContextBuilder()
-                       .contexts({sycl_ctx})
+        auto ctx = slabkit::ContextBuilder()
                        .devices({dev})
                        .slab_size_per_device(1024 * 1024)
                        .build();
@@ -182,10 +164,8 @@ TEST_CASE("SlabContext context_for returns correct platform context", "[context]
 
     SECTION("by device") {
         sycl::device dev{sycl::cpu_selector_v};
-        sycl::context sycl_ctx{dev};
 
-        auto ctx = slabkit::SlabContextBuilder()
-                       .contexts({sycl_ctx})
+        auto ctx = slabkit::ContextBuilder()
                        .devices({dev})
                        .slab_size_per_device(1024 * 1024)
                        .build();
@@ -196,15 +176,13 @@ TEST_CASE("SlabContext context_for returns correct platform context", "[context]
 }
 
 // =============================================================================
-// SlabContext queue factories
+// Context queue factories
 // =============================================================================
 
-TEST_CASE("SlabContext make_in_order_queue returns usable queue", "[context][slab_context]") {
+TEST_CASE("Context make_in_order_queue returns usable queue", "[context][slab_context]") {
     sycl::device dev{sycl::cpu_selector_v};
-    sycl::context sycl_ctx{dev};
 
-    auto ctx = slabkit::SlabContextBuilder()
-                   .contexts({sycl_ctx})
+    auto ctx = slabkit::ContextBuilder()
                    .devices({dev})
                    .slab_size_per_device(1024 * 1024)
                    .build();
@@ -213,12 +191,10 @@ TEST_CASE("SlabContext make_in_order_queue returns usable queue", "[context][sla
     REQUIRE(q.get_device() == dev);
 }
 
-TEST_CASE("SlabContext make_out_of_order_queue returns usable queue", "[context][slab_context]") {
+TEST_CASE("Context make_out_of_order_queue returns usable queue", "[context][slab_context]") {
     sycl::device dev{sycl::cpu_selector_v};
-    sycl::context sycl_ctx{dev};
 
-    auto ctx = slabkit::SlabContextBuilder()
-                   .contexts({sycl_ctx})
+    auto ctx = slabkit::ContextBuilder()
                    .devices({dev})
                    .slab_size_per_device(1024 * 1024)
                    .build();
@@ -227,12 +203,10 @@ TEST_CASE("SlabContext make_out_of_order_queue returns usable queue", "[context]
     REQUIRE(q.get_device() == dev);
 }
 
-TEST_CASE("SlabContext make_queue_with_props returns usable queue", "[context][slab_context]") {
+TEST_CASE("Context make_queue_with_props returns usable queue", "[context][slab_context]") {
     sycl::device dev{sycl::cpu_selector_v};
-    sycl::context sycl_ctx{dev};
 
-    auto ctx = slabkit::SlabContextBuilder()
-                   .contexts({sycl_ctx})
+    auto ctx = slabkit::ContextBuilder()
                    .devices({dev})
                    .slab_size_per_device(1024 * 1024)
                    .build();
