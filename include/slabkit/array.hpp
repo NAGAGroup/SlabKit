@@ -228,15 +228,15 @@ public:
         return subview_impl(offsets, sub_range);
     }
 
-    /// Factory function: allocate from a SlabKitContext pool
+    /// Factory function: allocate from a Context pool
     static DeviceArray from_pool(sycl::range<N> range,
-                                  std::shared_ptr<SlabKitContext> ctx,
+                                  std::shared_ptr<Context> ctx,
                                   size_t device_index) {
         auto& pool = ctx->pool_at(device_index);
         const size_t count = range.size();
         const size_t node_count = (count * sizeof(T) + pool.node_size() - 1) / pool.node_size();
         T* raw = static_cast<T*>(pool.allocate_array(node_count));
-        DeviceUSMPoolDeleter del{std::weak_ptr<SlabKitContext>(ctx), device_index, node_count};
+        DeviceUSMPoolDeleter del{std::weak_ptr<Context>(ctx), device_index, node_count};
         return DeviceArray{std::unique_ptr<T, DeviceUSMPoolDeleter>{raw, std::move(del)}, range, device_index};
     }
 
@@ -261,10 +261,10 @@ private:
 // Factory function
 // =============================================================================
 
-/// Explicit context factory: allocate from a SlabKitContext pool by device index.
+/// Explicit context factory: allocate from a Context pool by device index.
 template <typename T, int N>
 DeviceArray<T, N> make_device_array(sycl::range<N> range,
-                                     std::shared_ptr<SlabKitContext> ctx,
+                                     std::shared_ptr<Context> ctx,
                                      size_t device_index) {
     return DeviceArray<T, N>::from_pool(range, ctx, device_index);
 }
@@ -272,7 +272,7 @@ DeviceArray<T, N> make_device_array(sycl::range<N> range,
 /// Device overload: resolves device_index automatically via ctx->device_index(dev).
 template <typename T, int N>
 DeviceArray<T, N> make_device_array(sycl::range<N> range,
-                                     std::shared_ptr<SlabKitContext> ctx,
+                                     std::shared_ptr<Context> ctx,
                                      const sycl::device& dev) {
     return DeviceArray<T, N>::from_pool(range, ctx, ctx->device_index(dev));
 }
@@ -536,15 +536,15 @@ void sync_to_host(DeviceSubView<const T, N> src, T* dst,
 
 template <typename T, int N>
 class MirroredArray {
-    std::shared_ptr<SlabKitContext> ctx_;     // needed for clone()
+    std::shared_ptr<Context> ctx_;     // needed for clone()
     size_t                       device_idx_;
     DeviceArray<T, N>            device_;
     std::vector<T>               host_;
 
 public:
-    /// Constructor: takes explicit SlabKitContext and device index.
+    /// Constructor: takes explicit Context and device index.
     MirroredArray(sycl::range<N> range,
-                  std::shared_ptr<SlabKitContext> ctx,
+                  std::shared_ptr<Context> ctx,
                   size_t device_index)
         : ctx_(ctx)
         , device_idx_(device_index)

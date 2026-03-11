@@ -1,12 +1,12 @@
 #pragma once
 
 // =============================================================================
-// slabkit/context.hpp — SlabKitContext, SlabKitContextBuilder
+// slabkit/context.hpp — Context, ContextBuilder
 // =============================================================================
 //
-// SlabKitContext: manages SYCL contexts, devices, and device-specific memory pools
+// Context: manages SYCL contexts, devices, and device-specific memory pools
 //
-// SlabKitContextBuilder: builder pattern for constructing SlabKitContext.
+// ContextBuilder: builder pattern for constructing Context.
 //   Accepts a list of sycl::device objects and auto-creates one sycl::context
 //   per platform group. No explicit sycl::context objects are required.
 //
@@ -26,10 +26,10 @@
 namespace slabkit {
 
 // =============================================================================
-// SlabKitContext — SYCL platform contexts, devices, and memory pools
+// Context — SYCL platform contexts, devices, and memory pools
 // =============================================================================
 
-struct SlabKitContext : std::enable_shared_from_this<SlabKitContext> {
+struct Context : std::enable_shared_from_this<Context> {
     // Public data members (owned and managed)
     std::vector<sycl::context>                     platform_contexts;
     std::vector<sycl::device>                      devices;
@@ -53,7 +53,7 @@ struct SlabKitContext : std::enable_shared_from_this<SlabKitContext> {
             if (devices[i] == dev)
                 return i;
         }
-        throw std::invalid_argument("slabkit: device not found in SlabKitContext");
+        throw std::invalid_argument("slabkit: device not found in Context");
     }
 
     // =========================================================================
@@ -87,7 +87,7 @@ struct SlabKitContext : std::enable_shared_from_this<SlabKitContext> {
     /// Delegates to mutable overload via const_cast: safe because pools and pool_mutex_
     /// are mutable, so no const object is modified.
     const DeviceMemoryPool& pool_at(size_t idx) const {
-        return const_cast<SlabKitContext*>(this)->pool_at(idx);
+        return const_cast<Context*>(this)->pool_at(idx);
     }
 
     /// Returns the pool for a given device.
@@ -148,11 +148,11 @@ struct SlabKitContext : std::enable_shared_from_this<SlabKitContext> {
     // Move semantics (non-copyable)
     // =========================================================================
 
-    SlabKitContext(const SlabKitContext&)               = delete;
-    SlabKitContext& operator=(const SlabKitContext&)    = delete;
+    Context(const Context&)               = delete;
+    Context& operator=(const Context&)    = delete;
 
-    SlabKitContext(SlabKitContext&& other) noexcept
-        : std::enable_shared_from_this<SlabKitContext>(std::move(other))
+    Context(Context&& other) noexcept
+        : std::enable_shared_from_this<Context>(std::move(other))
         , platform_contexts(std::move(other.platform_contexts))
         , devices(std::move(other.devices))
         , device_to_platform(std::move(other.device_to_platform))
@@ -161,40 +161,40 @@ struct SlabKitContext : std::enable_shared_from_this<SlabKitContext> {
         , node_size_(other.node_size_)
     {}
 
-    SlabKitContext& operator=(SlabKitContext&&) = delete;
+    Context& operator=(Context&&) = delete;
 
-    SlabKitContext() = default;
+    Context() = default;
 };
 
 // =============================================================================
-// SlabKitContextBuilder — builder pattern with validation
+// ContextBuilder — builder pattern with validation
 // =============================================================================
 
-class SlabKitContextBuilder {
+class ContextBuilder {
 public:
     /// Set the list of SYCL devices.
-    SlabKitContextBuilder& devices(std::vector<sycl::device> devs) {
+    ContextBuilder& devices(std::vector<sycl::device> devs) {
         devices_ = std::move(devs);
         return *this;
     }
 
     /// Set the node size (granularity of pool allocations).
-    SlabKitContextBuilder& node_size(size_t ns) {
+    ContextBuilder& node_size(size_t ns) {
         node_size_ = ns;
         return *this;
     }
 
     /// Set uniform slab size for all devices.
-    SlabKitContextBuilder& slab_size_per_device(size_t sz) {
+    ContextBuilder& slab_size_per_device(size_t sz) {
         slab_size_ = sz;
         return *this;
     }
 
-    /// Build and return a shared_ptr<SlabKitContext>.
+    /// Build and return a shared_ptr<Context>.
     /// Automatically creates one sycl::context per platform group from the
-    /// provided devices. SlabKitContext must always be heap-allocated via
+    /// provided devices. Context must always be heap-allocated via
     /// shared_ptr so that enable_shared_from_this works for pool lazy init.
-    std::shared_ptr<SlabKitContext> build() {
+    std::shared_ptr<Context> build() {
         if (devices_.empty()) {
             throw std::invalid_argument("slabkit: no devices provided");
         }
@@ -220,7 +220,7 @@ public:
             }
         }
 
-        SlabKitContext result;
+        Context result;
         result.devices = devices_;
         result.device_to_platform.resize(devices_.size());
         result.device_slab_sizes.resize(devices_.size(),
@@ -243,7 +243,7 @@ public:
             result.device_to_platform[i] = std::distance(platform_keys.begin(), it);
         }
 
-        return std::shared_ptr<SlabKitContext>(new SlabKitContext(std::move(result)));
+        return std::shared_ptr<Context>(new Context(std::move(result)));
     }
 
 private:
