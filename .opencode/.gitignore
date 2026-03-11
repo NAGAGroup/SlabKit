@@ -1,7 +1,0 @@
-!.gitignore
-!opencode.json
-
-
-!context/
-!context/project-intelligence/
-!context/project-intelligence/**

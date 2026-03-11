@@ -1,0 +1,60 @@
+{
+  "name": "remove-allocator-registry-singleton",
+  "goal": "Remove the AllocatorRegistry singleton, rename SlabContext to SlabKitContext with an auto-context builder, add sycl::device-based factory methods, and enforce explicit context ownership throughout the library.",
+  "created": "2026-03-10",
+  "status": "in_progress",
+  "currentSubtask": 1,
+  "subtaskCount": 7,
+  "architectEnabled": false,
+  "circuitBreakerThreshold": 3,
+  "subtasks": [
+    {
+      "id": "01",
+      "name": "context-refactor",
+      "description": "Refactor context.hpp: rename SlabContext→SlabKitContext, SlabContextBuilder→SlabKitContextBuilder, update builder to auto-create sycl::context per platform group from devices",
+      "status": "completed"
+    },
+    {
+      "id": "02",
+      "name": "memory-refactor",
+      "description": "Refactor memory.hpp: delete AllocatorRegistry class entirely, update pool deleter type refs, add sycl::device overload to malloc_device, remove registry-backed free functions",
+      "status": "in_progress"
+    },
+    {
+      "id": "03",
+      "name": "array-refactor",
+      "description": "Refactor array.hpp: remove registry-backed factory overloads, add sycl::device overloads to make_device_array and related, update SlabContext→SlabKitContext refs",
+      "status": "pending"
+    },
+    {
+      "id": "04",
+      "name": "scratch-refactor",
+      "description": "Refactor scratch.hpp: remove registry-backed make_scratch overloads, add sycl::device overloads, update type refs. Gate G1 follows.",
+      "status": "pending"
+    },
+    {
+      "id": "G1",
+      "name": "api-shape-review",
+      "description": "GATE: Review API shape before test rewrite",
+      "status": "pending"
+    },
+    {
+      "id": "05",
+      "name": "test-refactor",
+      "description": "Update all 6 test files (test_memory, test_array, test_context, test_context_array, test_api, test_transfers) for new API",
+      "status": "pending"
+    },
+    {
+      "id": "06",
+      "name": "build-test",
+      "description": "HeadWrench: run pixi run configure dev, build dev, test dev; debug loop if failures",
+      "status": "pending"
+    },
+    {
+      "id": "07",
+      "name": "docs",
+      "description": "Update docs/design/slabkit-v0.1-design.md to reflect new architecture",
+      "status": "pending"
+    }
+  ]
+}
