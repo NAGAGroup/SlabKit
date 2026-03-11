@@ -228,15 +228,15 @@ public:
         return subview_impl(offsets, sub_range);
     }
 
-    /// Factory function: allocate from a SlabContext pool
+    /// Factory function: allocate from a SlabKitContext pool
     static DeviceArray from_pool(sycl::range<N> range,
-                                  std::shared_ptr<SlabContext> ctx,
+                                  std::shared_ptr<SlabKitContext> ctx,
                                   size_t device_index) {
         auto& pool = ctx->pool_at(device_index);
         const size_t count = range.size();
         const size_t node_count = (count * sizeof(T) + pool.node_size() - 1) / pool.node_size();
         T* raw = static_cast<T*>(pool.allocate_array(node_count));
-        DeviceUSMPoolDeleter del{std::weak_ptr<SlabContext>(ctx), device_index, node_count};
+        DeviceUSMPoolDeleter del{std::weak_ptr<SlabKitContext>(ctx), device_index, node_count};
         return DeviceArray{std::unique_ptr<T, DeviceUSMPoolDeleter>{raw, std::move(del)}, range, device_index};
     }
 
@@ -261,22 +261,20 @@ private:
 // Factory function
 // =============================================================================
 
-/// Registry-free factory: allocate from an explicit SlabContext.
-/// Phase 2 API — use this to construct from a specific SlabContext instance.
+/// Explicit context factory: allocate from a SlabKitContext pool by device index.
 template <typename T, int N>
 DeviceArray<T, N> make_device_array(sycl::range<N> range,
-                                     std::shared_ptr<SlabContext> ctx,
+                                     std::shared_ptr<SlabKitContext> ctx,
                                      size_t device_index) {
     return DeviceArray<T, N>::from_pool(range, ctx, device_index);
 }
 
-/// Registry-backed factory: allocate from AllocatorRegistry's global SlabContext.
-/// Phase 3 API — now that AllocatorRegistry returns shared_ptr<SlabContext>.
+/// Device overload: resolves device_index automatically via ctx->device_index(dev).
 template <typename T, int N>
-DeviceArray<T, N> make_device_array(sycl::range<N> range, const sycl::device& dev) {
-    auto ctx = AllocatorRegistry::context();
-    const size_t idx = ctx->device_index(dev);
-    return DeviceArray<T, N>::from_pool(range, ctx, idx);
+DeviceArray<T, N> make_device_array(sycl::range<N> range,
+                                     std::shared_ptr<SlabKitContext> ctx,
+                                     const sycl::device& dev) {
+    return DeviceArray<T, N>::from_pool(range, ctx, ctx->device_index(dev));
 }
 
 // =============================================================================
@@ -538,27 +536,20 @@ void sync_to_host(DeviceSubView<const T, N> src, T* dst,
 
 template <typename T, int N>
 class MirroredArray {
-    std::shared_ptr<SlabContext> ctx_;     // needed for clone()
+    std::shared_ptr<SlabKitContext> ctx_;     // needed for clone()
     size_t                       device_idx_;
     DeviceArray<T, N>            device_;
     std::vector<T>               host_;
 
 public:
-    /// Registry-free constructor: takes explicit SlabContext and device index.
-    /// Phase 2 API — matches DeviceArray changes.
+    /// Constructor: takes explicit SlabKitContext and device index.
     MirroredArray(sycl::range<N> range,
-                  std::shared_ptr<SlabContext> ctx,
+                  std::shared_ptr<SlabKitContext> ctx,
                   size_t device_index)
         : ctx_(ctx)
         , device_idx_(device_index)
         , device_(DeviceArray<T, N>::from_pool(range, ctx, device_index))
         , host_(range.size()) {}
-
-    /// Registry-backed constructor: allocates from AllocatorRegistry's global SlabContext.
-    /// Phase 3 API — now that AllocatorRegistry returns shared_ptr<SlabContext>.
-    MirroredArray(sycl::range<N> range, const sycl::device& dev)
-        : MirroredArray(range, AllocatorRegistry::context(),
-                        AllocatorRegistry::context()->device_index(dev)) {}
 
     // Move-only: DeviceArray is move-only
     MirroredArray(const MirroredArray&)            = delete;
