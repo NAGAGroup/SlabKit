@@ -1,7 +1,8 @@
 # SlabKit v0.1 — Design Document
 
-**Status**: In Progress  
+**Status**: Complete  
 **Date**: 2026-03-06  
+**Last Updated**: 2026-03-10 (post-refactor)
 **Mode**: D3 — Structured phases  
 
 ---
@@ -17,32 +18,35 @@ SlabKit is a header-only C++20 library providing SYCL USM memory management for 
 ```
 User code
     │
-    ├── DeviceArray<T,N>          (RAII owner, copyable via shared_ptr)
+    ├── DeviceArray<T,N>          (RAII owner, move-only via unique_ptr)
     ├── MirroredArray<T,N>        (paired device+host)
     ├── DeviceView<T,N>           (non-owning, contiguous, trivially copyable)
     └── DeviceSubView<T,N>        (non-owning, strided, trivially copyable)
             │
             └── make_device_array()
                     │
-                    └── malloc_shared_device_ptr<T>()
+                    └── malloc_device()
                             │
-                            └── AllocatorRegistry (Meyer's singleton, lazy per-device)
+                            └── Context (entry point, manages pools & contexts)
                                         │
-                            shared_ptr<DeviceMemoryPool>  (one per device, lazy)
+                    ContextBuilder (groups devices by platform, auto-creates sycl::context)
                                         │
-                            DeviceSlabAllocator  (BlockAllocator, owned by pool internally)
+                        shared_ptr<DeviceMemoryPool>  (one per device, lazy)
                                         │
-                            sycl::malloc_device slab (fraction of device global_mem, allocated once)
+                        DeviceSlabAllocator  (BlockAllocator, owned by pool internally)
+                                        │
+                        sycl::malloc_device slab (fraction of device global_mem, allocated once)
 ```
 
 **Invariants:**
 - No `sycl::buffer` / accessor — USM exclusively
-- All USM pointers are owned by `shared_ptr` or `unique_ptr` with `DeviceUSMFromPoolDeleter`
-- `DeviceArray` is copyable (shared ownership via `shared_ptr<T>`)
+- All USM pointers are owned by `unique_ptr<T, DeviceUSMPoolDeleter>` with weak_ptr<Context> lifetime anchor
+- `DeviceArray` is move-only (backed by `unique_ptr` with custom deleter)
 - Views are trivially copyable, safe to pass into SYCL kernels
 - Async transfers return `sycl::event` and accept `std::vector<sycl::event> deps`
 - `sycl::malloc_device` is called exactly once per device (at allocator construction) — never again
-- Queues are user-only; registry and allocator internals never construct or store queues
+- Queues are user-only; Context and allocator internals never construct or store queues
+- `Context` is always heap-allocated via `shared_ptr` for `enable_shared_from_this` to work in lazy pool init
 
 ---
 
@@ -62,59 +66,70 @@ The slab allocator is deliberately dumb: linear scan over `std::vector<bool> blo
 
 ### `DeviceSlabAllocator` — copyable via `shared_ptr`
 
-`DeviceSlabAllocator` is **copyable, not movable**. This is required because foonathan's pool constructor takes the `BlockAllocator` by value, creating a copy that lives inside the pool. The registry's allocator instance (owned by the pool) and any external copies all share the same `shared_ptr<void>` slab.
+`DeviceSlabAllocator` is **copyable, not movable**. This is required because foonathan's pool constructor takes the `BlockAllocator` by value, creating a copy that lives inside the pool. The allocator instance owned by the pool and any external copies all share the same `shared_ptr<void>` slab.
 
 Ownership chain:
 - `slab_` is `shared_ptr<void>` with `SlabDeleter{shared_ptr<sycl::context>}`
-- `sycl::context` is also `shared_ptr<sycl::context>` (one per platform, owned by registry)
+- `sycl::context` is also `shared_ptr<sycl::context>` (one per platform, owned by `Context`)
 - Copy of allocator = copy of shared_ptrs = shared slab and context ownership
 
 ---
 
-### Registry — pools only, no allocator storage
+### ContextBuilder — auto-context creation per platform group
 
-**Decision:** `AllocatorRegistry` stores only `vector<shared_ptr<DeviceMemoryPool>>`. No separate allocator vector. The pool is the only external handle needed. The `DeviceSlabAllocator` is constructed inline during pool construction and lives inside foonathan's arena.
+**Decision:** `ContextBuilder` accepts only a `devices(vector<sycl::device>)` input — no explicit `sycl::context` construction required from the user. The builder automatically groups devices by `(backend, platform_name)` composite key and creates one `sycl::context` per platform group.
 
-`pool(device_index)` returns `shared_ptr<DeviceMemoryPool>` — callers can hold a copy for lifetime safety.
+`build()` returns `shared_ptr<Context>` with:
+- `Context::platform_contexts` — auto-populated, one `sycl::context` per platform group
+- `Context::device_to_platform` — mapping from device index to platform context index
+- All pools lazy-initialized on first access to `Context::pool_at(device_index)`
 
----
-
-### `sycl::context` — one per platform, no queues in registry
-
-Registry groups devices by platform during `init()` using `get_backend() + get_info<platform::name>()` as a composite key (`.get()` is not standard). Constructs one `shared_ptr<sycl::context>` per platform via `sycl::context(vector<sycl::device>)`. No queues ever constructed or stored in registry internals.
-
----
-
-### USM pointer ownership — `DeviceUSMFromPoolDeleter<T>`
-
-**Decision:** USM pointers allocated from a pool are owned by `shared_ptr<T>` or `unique_device_ptr<T>`, both using `DeviceUSMFromPoolDeleter<T>`.
+Rationale: No global state or singleton. User creates and owns the `Context` via `shared_ptr`. `enable_shared_from_this<Context>` enables safe lazy pool initialization with weak_ptr lifetime anchors. No queues are created or stored by `ContextBuilder` or `Context` — queues are entirely user-side.
 
 ```cpp
-template <typename T>
-struct DeviceUSMFromPoolDeleter {
-    size_t                          count;
-    std::weak_ptr<DeviceMemoryPool> pool;   // weak — does not extend pool lifetime
+auto ctx = ContextBuilder()
+    .devices(device_list)
+    .node_size(1024)
+    .slab_size_per_device(128 * 1024 * 1024)
+    .build();
 
-    void operator()(T* ptr) const noexcept {
-        if (auto p = pool.lock())
-            p->deallocate_node(ptr, count * sizeof(T), alignof(T));
-        // if expired: pool destroyed, USM freed with it — skip silently
+auto arr = make_device_array<float, 2>(range, ctx, device_index);
+```
+
+---
+
+### USM pointer ownership — `DeviceUSMPoolDeleter`
+
+**Decision:** USM pointers allocated from a `Context` pool are owned by `unique_ptr<T, DeviceUSMPoolDeleter>` with a weak_ptr<Context> lifetime anchor.
+
+```cpp
+struct DeviceUSMPoolDeleter {
+    std::weak_ptr<Context> ctx;
+    size_t device_index;
+    size_t node_count;
+
+    void operator()(void *ptr) const noexcept {
+        if (auto c = ctx.lock())
+            c->pool_at(device_index).deallocate_array(ptr, node_count);
+        // if expired: Context destroyed, USM slab already freed — no-op is correct
     }
 };
 
 template <typename T>
-using unique_device_ptr = std::unique_ptr<T, DeviceUSMFromPoolDeleter<T>>;
+using unique_device_ptr = std::unique_ptr<T, DeviceUSMPoolDeleter>;
 ```
 
-The deleter holds a `weak_ptr` — it does not keep the pool alive. `malloc_shared_device_ptr` captures the pool as `weak_ptr` in its lambda deleter. `malloc_unique_device_ptr` uses `DeviceUSMFromPoolDeleter` directly.
+The deleter holds a `weak_ptr<Context>` — it does not keep the context alive. If the context is destroyed before the pointer is deleted, deallocation is skipped silently (the slab was already freed when the context destroyed). This enables safe cleanup without worrying about destructor ordering.
+
+**Rationale:** `weak_ptr` breaks the cycle that would arise if the context held strong `shared_ptr` to pools which held strong `shared_ptr` back to context. The weak anchor is sufficient because contexts outlive their allocations in typical usage — and if they don't, silent skip is correct (memory will be freed with the context's slab anyway).
 
 ---
 
-### `DeviceArray` — copyable via `shared_ptr`
+### `DeviceArray` — move-only via `unique_ptr`
 
-`DeviceArray<T,N>` stores `shared_ptr<T>` (from `malloc_shared_device_ptr`). Copy/move all defaulted. This matches the ergonomics of `sycl::buffer` which SlabKit is intended to replace — no artificial move-only friction.
+`DeviceArray<T,N>` stores `unique_ptr<T, DeviceUSMPoolDeleter>` backing and is **move-only** (copy constructor and assignment deleted). This is a departure from the copyable-via-shared_ptr ergonomics of `sycl::buffer`, but reflects the actual SYCL USM model: each unique allocation is owned by a single logical entity at a time.
 
-`MirroredArray` copy: device side shares ownership (shared_ptr), host `std::vector<T>` is deep-copied — intentional, two independent host buffers sharing one device allocation would be a footgun.
+`MirroredArray` is also move-only (because its device side is `DeviceArray`). Host `std::vector<T>` is cloned on `clone()` call, not on copy — intentional, two independent host buffers sharing one device allocation would be a footgun.
 
 ---
 
@@ -155,40 +170,6 @@ std::size_t strided_offset(sycl::id<N> id, sycl::range<N> strides) noexcept;
 
 ---
 
-### `AllocatorRegistry::Config` — runtime configuration
-
-**Decision:** Replace individual `set_*` methods with a `Config` struct accessed via a public static `config()` Meyer's singleton that always returns a mutable reference.
-
-```cpp
-struct Config {
-    size_t block_size           = 64ull * 1024;  // arena block granularity (bytes)
-    size_t node_size            = 1024;           // pool freelist node size (bytes)
-    float  device_slab_fraction = 0.60f;          // fraction of global_mem_size for non-CPU devices
-    float  cpu_slab_fraction    = 0.30f;          // fraction of global_mem_size for CPU devices
-};
-
-static Config& config();
-```
-
-`config()` is the only configuration interface. Users modify only the fields they care about. Writes after the first call to `get()` are silently ignored (config is read exactly once in `init()`).
-
-**Slab sizing** is computed per-device in `init()` rather than stored as a fixed value:
-
-```cpp
-const size_t total_mem = dev.get_info<sycl::info::device::global_mem_size>();
-const float  fraction  = dev.is_cpu() ? cfg.cpu_slab_fraction : cfg.device_slab_fraction;
-const size_t computed  = static_cast<size_t>(total_mem * fraction);
-device_slab_sizes_[dev_idx] = std::max(computed, 2 * cfg.block_size);
-```
-
-Rationale: SlabKit is intended to be the only USM allocation mechanism for an application. Claiming a fixed fraction of total `global_mem_size` (the only memory query available in SYCL — there is no free-memory equivalent) is the correct approach. 60% for GPU devices, 30% for CPU devices (OpenCL, OMP) which share system memory. Floor of `2 * block_size` ensures the slab always holds at least two blocks.
-
-`pool_initial_blocks_` is removed entirely. `memory_pool`'s mandatory initial block allocation is cheap — `DeviceSlabAllocator::allocate_block()` is just a bitmap flip and pointer offset, no additional USM allocation.
-
-**Note:** `device_slab_sizes_[dev_idx]` must be block-aligned for `DeviceSlabAllocator`'s assert (`total_size % block_size == 0`). This rounding is a known open item — see §5.
-
----
-
 ### Pool node size — 1024 bytes
 
 Default `node_size = 1024` in `Config`. Rationale: typical workloads are large persistent arrays (handled by pool node rounding) and small temporaries (handled by scratch memory stack). 1024B is a reasonable mid-point; pool exhaustion throws `std::bad_alloc`.
@@ -201,123 +182,96 @@ Default `node_size = 1024` in `Config`. Rationale: typical workloads are large p
 
 ---
 
-### `DeviceSubView` transfers — not yet implemented (Phase 5)
+### `DeviceSubView` transfers — implemented with staging buffers
 
-`copy_to_host` / `copy_to_device` for `DeviceSubView` are currently `static_assert(sizeof(T) == 0, "not yet implemented")` placeholders. They will not compile if instantiated, but do not block compilation of the rest of the file.
+Strided transfers (`copy_to_host` / `copy_to_device`) use device USM staging buffers (allocated from `DeviceScratchMemory`), not host staging. Pipeline:
 
-**Planned implementation (Phase 5):** `sycl::malloc_host` staging buffer + gather/scatter SYCL kernels. Event chain: `input_deps → gather_event → memcpy_event`. RAII staging wrapper with `event.wait()` in destructor before `sycl::free`.
+**Gather (`copy_to_host`, strided device → host):**
+1. Allocate contiguous staging on device from scratch memory
+2. `parallel_for` kernel: `staging[linear_i] = src[strided_id]` (gather)
+3. `memcpy(staging → host_ptr, {gather_event})`
+
+**Scatter (`copy_to_device`, host → strided device):**
+1. Allocate contiguous staging on device from scratch memory
+2. `memcpy(host_ptr → staging, deps)`
+3. `parallel_for` kernel: `dst[strided_id] = staging[linear_i]` (scatter)
+
+Caller must keep `DeviceScratchMemory` alive until the returned `sycl::event` completes.
 
 ---
 
 ### Thread safety — current state
 
-- Registry-level init: `std::call_once(registry_init_, ...)` — safe
-- Per-device pool init: `std::call_once(pool_flags_[i], ...)` + `std::mutex sycl_init_mutex_` — safe
-- Per-device alloc/dealloc (`DeviceMemoryPool::allocate_node`): **not thread-safe** — documented v0.1 contract: single-threaded allocation per device. Per-device mutex deferred to v0.2.
-- `AllocatorRegistry::config()`: not thread-safe vs concurrent init — must be called before first `AllocatorRegistry::get()`.
+- Per-device pool init: double-checked locking in `Context::pool_at()` using `std::mutex pool_mutex_` — safe
+- Per-device alloc/dealloc (`DeviceMemoryPool::allocate_array` / `deallocate_array`): **not thread-safe** — documented v0.1 contract: single-threaded allocation per device. Per-device mutex deferred to v0.2.
+- `Context` construction is not thread-safe (user responsibility to construct once and share) — by design, once constructed, `Context` is immutable (no setters after `build()`).
 
 ---
 
 ## 4. Current File State
 
-### `include/slabkit/memory.hpp` — DONE (387 lines)
+### `include/slabkit/memory.hpp` — DONE (83 lines)
 
 Contains:
-- `DeviceSlabAllocator` — `BlockAllocator`, copyable, owns slab via `shared_ptr<void>` with `SlabDeleter`
-- `DeviceMemoryPool` = `memory::memory_pool<memory::array_pool, DeviceSlabAllocator>`
-- `DeviceScratchMemory` = `memory::memory_stack<DeviceMemoryPool>`
-- `DeviceUSMFromPoolDeleter<T>` + `unique_device_ptr<T>` alias
-- `AllocatorRegistry` — singleton, lazy per-device pool construction, one `shared_ptr<context>` per platform
-  - `Config` struct + `config()` public static accessor
-  - Per-device slab sizing via `global_mem_size * fraction` computed at `init()`
-- Free functions: `malloc_shared_device_ptr<T>`, `malloc_unique_device_ptr<T>`, `make_scratch_memory`
+- `DeviceUSMPoolDeleter` — custom deleter for USM pointers allocated from Context pools
+- `unique_device_ptr<T>` alias = `std::unique_ptr<T, DeviceUSMPoolDeleter>`
+- Free functions: `malloc_device<T>(count, ctx, device_index)` and `malloc_device<T>(count, ctx, dev)` overloads
 
-### `include/slabkit/array.hpp` — DONE (340 lines)
+### `include/slabkit/array.hpp` — DONE (610 lines)
 
 Contains:
 - `slabkit::detail::row_major_offset` + `strided_offset` fold-expression helpers
 - `DeviceViewLike` concept
 - `DeviceView<T,N>` — contiguous, fold-expression operators
 - `DeviceSubView<T,N>` — strided, fold-expression operators
-- `DeviceArray<T,N>` — copyable via `shared_ptr<T>`, `view()` + `subview()`
-- `make_device_array<T,N>` — uses `malloc_shared_device_ptr`
-- Transfer functions: `copy_to_host`, `copy_to_device`, `copy` for `DeviceArray` and `DeviceView`
-- `DeviceSubView` transfers: `static_assert` stubs (Phase 5)
-- `sync_to_host` blocking convenience
-- `MirroredArray<T,N>` — paired device+host, device side shared, host side deep-copy on copy
+- `DeviceArray<T,N>` — move-only via `unique_ptr<T, DeviceUSMPoolDeleter>`, `view()` + `subview()`
+- `make_device_array<T,N>(range, ctx, device_index)` and `make_device_array<T,N>(range, ctx, dev)` overloads
+- Transfer functions: `copy_to_host`, `copy_to_device`, `copy` for `DeviceArray`, `DeviceView`, and `DeviceSubView`
+- `sync_to_host` blocking convenience wrappers
+- `MirroredArray<T,N>` — paired device+host, device side move-only, host side deep-copy on `clone()`
 
-### `include/slabkit/device_allocator.hpp` — DELETED
+### `include/slabkit/context.hpp` — DONE (255 lines)
 
-No longer needed. `array.hpp` includes `slabkit/memory.hpp` directly.
+Contains:
+- `Context` — manages SYCL platform contexts, devices, and device-specific memory pools
+- `ContextBuilder` — builder pattern, accepts `devices()`, auto-creates one `sycl::context` per platform group
 
-### `tests/test_memory.cpp` / `tests/test_array.cpp` — stubs
+### `include/slabkit/scratch.hpp` — DONE
 
-Includes uncommented, all test cases are `SUCCEED("not yet implemented")`. Phase 6.
+Contains:
+- `DeviceScratchMemory` / `DeviceScratchBuffer` = `memory::memory_stack<DeviceMemoryPool>`
+- `DeviceScratchView<T,N>` — non-owning scratch view
+- Free functions: `make_scratch(ctx, device_index, size)` and `make_scratch(ctx, dev, size)` overloads
+- No registry-backed overloads — all factory functions require an explicit `Context`
+
+### `tests/` — DONE (6 test files, 64 tests, 64/64 passing)
+
+- `test_context.cpp` — `Context`, `ContextBuilder`, `pool_for`, `device_index`, queue creation
+- `test_array.cpp` — `DeviceArray`, `DeviceView`, `DeviceSubView`, `make_device_array` (context + device overloads)
+- `test_memory.cpp` — `malloc_device` (registry-free), `AllocationError`
+- `test_scratch.cpp` — `make_scratch` (context, device_index, sycl::device overloads)
+- `test_api.cpp` — `DeviceViewLike` concept checks
+- `test_transfers.cpp` — `copy_to_device`, `copy_to_host`, sync, `MirroredArray`
+
+All test files are context-backed; no registry tests remain.
 
 ---
 
 ## 5. Remaining Work
 
-### Phase 4.5 — Block-align computed slab sizes (`memory.hpp`)
+All planned phases for v0.1 are complete. `AllocatorRegistry` removed in session `remove-allocator-registry-singleton` (2026-03-10).
 
-`device_slab_sizes_[dev_idx]` is currently `max(total_mem * fraction, 2 * block_size)` with no guarantee of block alignment. `DeviceSlabAllocator` asserts `total_size % block_size == 0`. Fix:
-
-```cpp
-const size_t raw = std::max(computed, 2 * cfg.block_size);
-device_slab_sizes_[dev_idx] = (raw / cfg.block_size) * cfg.block_size;
-```
-
-### Phase 5 — DeviceSubView transfers (`array.hpp`)
-
-Implement `copy_to_host` and `copy_to_device` for `DeviceSubView<T,N>`:
-
-1. Allocate `sycl::malloc_host<T>(src.size(), q)` staging buffer — RAII wrapper with `event.wait()` + `sycl::free` in destructor
-2. **Gather kernel** (`copy_to_host`):
-   - `cgh.parallel_for(src.get_range(), [=](sycl::id<N> idx) { staging[row_major_offset(idx, extents)] = src[idx]; })`
-   - Event chain: `input_deps → gather_event → memcpy(staging→dst, {gather_event})`
-3. **Scatter kernel** (`copy_to_device`):
-   - Symmetric: `memcpy(src→staging, deps) → scatter_event` where kernel writes `dst[idx] = staging[row_major_offset(idx, extents)]`
-4. `strides_` in `DeviceSubView` is `sycl::range<N>` — device-copyable, can be captured by value in kernel lambda
-
-### Phase 6 — Tests (`test_memory.cpp`, `test_array.cpp`)
-
-`test_memory.cpp`:
-- `AllocatorRegistry::get()` returns singleton
-- Lazy init: pool is null before first access, constructed after
-- `malloc_shared_device_ptr` / `malloc_unique_device_ptr` return non-null
-- `make_scratch_memory` constructs without throwing
-- `AllocatorRegistry::config()` modifications affect subsequent pool construction (when called before `get()`)
-
-`test_array.cpp`:
-- `DeviceView` satisfies `DeviceViewLike` concept
-- `DeviceView::operator()` / `operator[]` correct row-major offsets (1D, 2D)
-- `DeviceSubView::operator()` / `operator[]` correct strided offsets
-- `DeviceArray` copyable — copy shares device memory
-- `make_device_array` allocates non-null
-- `DeviceArray::subview` bounds check fires on OOB
-- `MirroredArray` round-trip: `sync_to_device` → kernel → `sync_to_host` → correct values
-- `copy_to_host` / `copy_to_device` return valid `sycl::event`
-
-### Final gate — single build + test run
-
-```
-pixi run configure
-pixi run build
-pixi run test
-```
-
-Known issues to watch at build gate:
-- `sycl::context(vector<sycl::device>)` constructor — AdaptiveCpp signature may differ
-- `sycl::platform::get_backend()` — verify AdaptiveCpp exposes this on `sycl::platform`
-- `DeviceScratchMemory{pool}` — `memory_stack<DeviceMemoryPool>` takes pool by reference; verify foonathan doesn't copy it
-- `row_major_offset_impl` right-fold evaluation order — verify correct strides for 2D/3D cases
+Potential v0.2 items (tracked separately):
+- Per-device allocation thread safety — add per-device `std::mutex` in `DeviceMemoryPool`
+- `ext_oneapi_memcpy2d` fast path for 2D SubView transfers (Intel-only extension)
+- Custom pool injection into `make_device_array`
 
 ---
 
 ## 6. Out of Scope for v0.1
 
 - Per-device allocation thread safety (v0.2 — add per-device `std::mutex` in `DeviceMemoryPool`)
-- Device reset / registry teardown
+- Global default context / convenience singleton — by design, users must construct `Context` explicitly
 - Allocation statistics API
 - `ext_oneapi_memcpy2d` fast path for 2D SubView transfers (Intel-only extension)
 - N≥4 view support (blocked by SYCL spec `sycl::id<N>` / `sycl::range<N>` cap at N=3)

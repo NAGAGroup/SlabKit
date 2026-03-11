@@ -23,13 +23,13 @@
 | # | Status | Description |
 |---|--------|-------------|
 | 01 | ✅ complete | Refactor `context.hpp`: rename SlabContext→SlabKitContext, update builder to auto-create contexts — **CodeWriter / standard** |
-| 02 | ▶️ in_progress | Refactor `memory.hpp`: delete AllocatorRegistry, update pool deleter, add `sycl::device` overload to `malloc_device` — **CodeWriter / standard** |
-| 03 | 🔲 pending | Refactor `array.hpp`: remove registry-backed factory overloads, add `sycl::device` overloads, update type refs — **CodeWriter / standard** |
-| 04 | 🔲 pending | Refactor `scratch.hpp`: remove registry-backed overloads, add `sycl::device` overloads, update type refs — **CodeWriter / standard** |
-| G1 | 🚫 GATE | Review API shape before test rewrite |
-| 05 | 🔲 pending | Update all 6 test files for new API — **CodeWriter / standard** |
-| 06 | 🔲 pending | Build & test — **HeadWrench** |
-| 07 | 🔲 pending | Update `docs/design/slabkit-v0.1-design.md` — **DocWriter / fast** |
+| 02 | ✅ complete | Refactor `memory.hpp`: delete AllocatorRegistry, update pool deleter, add `sycl::device` overload to `malloc_device` — **CodeWriter / standard** |
+| 03 | ✅ complete | Refactor `array.hpp`: remove registry-backed factory overloads, add `sycl::device` overloads, update type refs — **CodeWriter / standard** |
+| 04 | ✅ complete | Refactor `scratch.hpp`: remove registry-backed overloads, add `sycl::device` overloads, update type refs — **CodeWriter / standard** |
+| G1 | ✅ complete | Review API shape before test rewrite |
+| 05 | ✅ complete | Update all 6 test files for new API — **CodeWriter / standard** |
+| 06 | ✅ complete | Build & test — **HeadWrench** |
+| 07 | ▶️ in_progress | Update `docs/design/slabkit-v0.1-design.md` — **DocWriter / fast** |
 
 ---
 
@@ -51,9 +51,9 @@
 
 ## Current Focus
 
-**Status:** In progress — subtask 01 complete.
+**Status:** In progress — subtasks 01–06 complete, G1 complete. Now updating design doc (subtask 07).
 
-**Next:** Subtask 02 — Refactor `memory.hpp`.
+**Next:** Final commit after docs update.
 
 ---
 
