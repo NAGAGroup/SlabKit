@@ -1,17 +1,17 @@
 #pragma once
 
 // =============================================================================
-// slabkit/context.hpp — SlabContext, SlabContextBuilder
+// slabkit/context.hpp — SlabKitContext, SlabKitContextBuilder
 // =============================================================================
 //
-// SlabContext: manages SYCL contexts, devices, and device-specific memory pools
+// SlabKitContext: manages SYCL contexts, devices, and device-specific memory pools
 //
-// SlabContextBuilder: builder pattern for constructing SlabContext with
-//   validation of platform coverage and lazy pool initialization
+// SlabKitContextBuilder: builder pattern for constructing SlabKitContext.
+//   Accepts a list of sycl::device objects and auto-creates one sycl::context
+//   per platform group. No explicit sycl::context objects are required.
 //
 
 #include <algorithm>
-#include <cassert>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -26,10 +26,10 @@
 namespace slabkit {
 
 // =============================================================================
-// SlabContext — SYCL platform contexts, devices, and memory pools
+// SlabKitContext — SYCL platform contexts, devices, and memory pools
 // =============================================================================
 
-struct SlabContext : std::enable_shared_from_this<SlabContext> {
+struct SlabKitContext : std::enable_shared_from_this<SlabKitContext> {
     // Public data members (owned and managed)
     std::vector<sycl::context>                     platform_contexts;
     std::vector<sycl::device>                      devices;
@@ -53,7 +53,7 @@ struct SlabContext : std::enable_shared_from_this<SlabContext> {
             if (devices[i] == dev)
                 return i;
         }
-        throw std::invalid_argument("slabkit: device not found in SlabContext");
+        throw std::invalid_argument("slabkit: device not found in SlabKitContext");
     }
 
     // =========================================================================
@@ -87,7 +87,7 @@ struct SlabContext : std::enable_shared_from_this<SlabContext> {
     /// Delegates to mutable overload via const_cast: safe because pools and pool_mutex_
     /// are mutable, so no const object is modified.
     const DeviceMemoryPool& pool_at(size_t idx) const {
-        return const_cast<SlabContext*>(this)->pool_at(idx);
+        return const_cast<SlabKitContext*>(this)->pool_at(idx);
     }
 
     /// Returns the pool for a given device.
@@ -148,11 +148,11 @@ struct SlabContext : std::enable_shared_from_this<SlabContext> {
     // Move semantics (non-copyable)
     // =========================================================================
 
-    SlabContext(const SlabContext&)            = delete;
-    SlabContext& operator=(const SlabContext&) = delete;
+    SlabKitContext(const SlabKitContext&)               = delete;
+    SlabKitContext& operator=(const SlabKitContext&)    = delete;
 
-    SlabContext(SlabContext&& other) noexcept
-        : std::enable_shared_from_this<SlabContext>(std::move(other))
+    SlabKitContext(SlabKitContext&& other) noexcept
+        : std::enable_shared_from_this<SlabKitContext>(std::move(other))
         , platform_contexts(std::move(other.platform_contexts))
         , devices(std::move(other.devices))
         , device_to_platform(std::move(other.device_to_platform))
@@ -161,119 +161,92 @@ struct SlabContext : std::enable_shared_from_this<SlabContext> {
         , node_size_(other.node_size_)
     {}
 
-    SlabContext& operator=(SlabContext&&) = delete;
+    SlabKitContext& operator=(SlabKitContext&&) = delete;
 
-    SlabContext() = default;
+    SlabKitContext() = default;
 };
 
 // =============================================================================
-// SlabContextBuilder — builder pattern with validation
+// SlabKitContextBuilder — builder pattern with validation
 // =============================================================================
 
-class SlabContextBuilder {
+class SlabKitContextBuilder {
 public:
-    /// Set the list of SYCL contexts (platform contexts).
-    SlabContextBuilder& contexts(std::vector<sycl::context> ctxs) {
-        contexts_ = std::move(ctxs);
-        return *this;
-    }
-
     /// Set the list of SYCL devices.
-    SlabContextBuilder& devices(std::vector<sycl::device> devs) {
+    SlabKitContextBuilder& devices(std::vector<sycl::device> devs) {
         devices_ = std::move(devs);
         return *this;
     }
 
     /// Set the node size (granularity of pool allocations).
-    SlabContextBuilder& node_size(size_t ns) {
+    SlabKitContextBuilder& node_size(size_t ns) {
         node_size_ = ns;
         return *this;
     }
 
     /// Set uniform slab size for all devices.
-    SlabContextBuilder& slab_size_per_device(size_t sz) {
+    SlabKitContextBuilder& slab_size_per_device(size_t sz) {
         slab_size_ = sz;
         return *this;
     }
 
-    /// Build and return a shared_ptr<SlabContext>.
-    /// SlabContext must always be heap-allocated via shared_ptr so that
-    /// enable_shared_from_this works for pool lazy init.
-    std::shared_ptr<SlabContext> build() {
+    /// Build and return a shared_ptr<SlabKitContext>.
+    /// Automatically creates one sycl::context per platform group from the
+    /// provided devices. SlabKitContext must always be heap-allocated via
+    /// shared_ptr so that enable_shared_from_this works for pool lazy init.
+    std::shared_ptr<SlabKitContext> build() {
         if (devices_.empty()) {
             throw std::invalid_argument("slabkit: no devices provided");
         }
 
-        if (contexts_.empty()) {
-            throw std::invalid_argument("slabkit: no contexts provided");
-        }
+        // Group devices by (backend, platform_name) — one sycl::context per group.
+        std::vector<std::vector<sycl::device>>             devices_by_platform;
+        std::vector<std::pair<sycl::backend, std::string>> platform_keys;
 
-        // Pass 1: Check for duplicate platforms in contexts_
-        std::vector<std::pair<sycl::backend, std::string>> seen_platforms;
-        for (const auto& ctx : contexts_) {
-            auto ctx_devices = ctx.get_devices();
-            for (const auto& d : ctx_devices) {
-                auto backend = d.get_platform().get_backend();
-                auto name    = d.get_platform().get_info<sycl::info::platform::name>();
+        for (const auto& dev : devices_) {
+            const sycl::platform plat    = dev.get_platform();
+            const auto           backend = plat.get_backend();
+            const auto           name    = plat.get_info<sycl::info::platform::name>();
 
-                for (const auto& [seen_backend, seen_name] : seen_platforms) {
-                    if (backend == seen_backend && name == seen_name) {
-                        throw std::invalid_argument(
-                            "slabkit: duplicate platform in contexts");
-                    }
-                }
-                seen_platforms.emplace_back(backend, name);
+            auto it = std::find_if(platform_keys.begin(), platform_keys.end(),
+                                   [backend, &name](const auto& key) {
+                                       return key.first == backend && key.second == name;
+                                   });
+            if (it == platform_keys.end()) {
+                platform_keys.push_back({backend, name});
+                devices_by_platform.push_back({dev});
+            } else {
+                devices_by_platform[std::distance(platform_keys.begin(), it)].push_back(dev);
             }
         }
 
-        // Pass 2: Check that each device is covered by some context
-        SlabContext result;
-        result.devices                = devices_;
-        result.platform_contexts      = contexts_;
+        SlabKitContext result;
+        result.devices = devices_;
         result.device_to_platform.resize(devices_.size());
         result.device_slab_sizes.resize(devices_.size(),
-                                         slab_size_ > 0 ? slab_size_ : (64 * 1024 * 1024));
+                                        slab_size_ > 0 ? slab_size_ : (64 * 1024 * 1024));
         result.pools.resize(devices_.size());
         result.node_size_ = node_size_;
 
+        for (const auto& dev_group : devices_by_platform)
+            result.platform_contexts.push_back(sycl::context(dev_group));
+
         for (size_t i = 0; i < devices_.size(); ++i) {
-            auto dev_backend = devices_[i].get_platform().get_backend();
-            auto dev_name =
-                devices_[i].get_platform().get_info<sycl::info::platform::name>();
+            const sycl::platform plat    = devices_[i].get_platform();
+            const auto           backend = plat.get_backend();
+            const auto           name    = plat.get_info<sycl::info::platform::name>();
 
-            size_t matching_ctx_idx = std::numeric_limits<size_t>::max();
-
-            // Find which context covers this device
-            for (size_t ctx_idx = 0; ctx_idx < contexts_.size(); ++ctx_idx) {
-                auto ctx_devices = contexts_[ctx_idx].get_devices();
-                for (const auto& ctx_dev : ctx_devices) {
-                    auto ctx_backend = ctx_dev.get_platform().get_backend();
-                    auto ctx_name =
-                        ctx_dev.get_platform().get_info<sycl::info::platform::name>();
-
-                    if (dev_backend == ctx_backend && dev_name == ctx_name) {
-                        matching_ctx_idx = ctx_idx;
-                        break;
-                    }
-                }
-                if (matching_ctx_idx != std::numeric_limits<size_t>::max()) {
-                    break;
-                }
-            }
-
-            if (matching_ctx_idx == std::numeric_limits<size_t>::max()) {
-                throw std::invalid_argument(
-                    "slabkit: device not covered by any provided context");
-            }
-
-            result.device_to_platform[i] = matching_ctx_idx;
+            auto it = std::find_if(platform_keys.begin(), platform_keys.end(),
+                                   [backend, &name](const auto& key) {
+                                       return key.first == backend && key.second == name;
+                                   });
+            result.device_to_platform[i] = std::distance(platform_keys.begin(), it);
         }
 
-        return std::shared_ptr<SlabContext>(new SlabContext(std::move(result)));
+        return std::shared_ptr<SlabKitContext>(new SlabKitContext(std::move(result)));
     }
 
 private:
-    std::vector<sycl::context> contexts_;
     std::vector<sycl::device>  devices_;
     size_t                     node_size_  = 1024;
     size_t                     slab_size_  = 0;  // 0 = use default (64MB)
