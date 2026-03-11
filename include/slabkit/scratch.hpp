@@ -7,13 +7,13 @@
 // Exports:
 //   - DeviceScratchBuffer: type alias for DeviceScratchMemory
 //   - DeviceScratchView: non-owning, trivially copyable view into scratch memory
-//   - make_scratch(dev, size): registry-backed factory
-//   - make_scratch(ctx, device_index, size): registry-free factory
-//
-// Note: Factory implementations are in memory.hpp to avoid circular includes.
+//   - make_scratch(ctx, device_index, size): explicit-context factory
+//   - make_scratch(ctx, dev, size): device-based explicit-context factory
 //
 
 #include <cstddef>
+
+#include <sycl/sycl.hpp>
 
 #include "slabkit/detail/device_stack.hpp"
 #include "slabkit/context.hpp"
@@ -52,27 +52,26 @@ struct DeviceScratchView {
 };
 
 // =============================================================================
-// Factory functions — declared here, implemented in memory.hpp
+// Factory functions
 // =============================================================================
 
-// =============================================================================
-// Factory function — registry-free, defined here
-// =============================================================================
-
-/// Registry-free scratch factory: allocates from an explicit SlabContext pool.
-/// Uses the aliasing shared_ptr trick to keep SlabContext alive via the pool pointer.
-/// \param ctx          Shared SlabContext (lifetime extended via aliasing shared_ptr).
-/// \param device_index Index of the device in ctx.devices.
+/// Explicit-context scratch factory: allocates from a SlabKitContext pool by device index.
+/// \param ctx          Shared SlabKitContext.
+/// \param device_index Index of the device in ctx.
 /// \param size         Bytes to allocate (default: 64 KB).
 /// \throws std::out_of_range if device_index is invalid.
 /// \throws AllocationError if the pool cannot satisfy the allocation.
-inline DeviceScratchBuffer make_scratch(std::shared_ptr<SlabContext> ctx,
+inline DeviceScratchBuffer make_scratch(std::shared_ptr<SlabKitContext> ctx,
                                          std::size_t device_index,
                                          std::size_t size = 64 * 1024) {
     return DeviceScratchBuffer{&ctx->pool_at(device_index), size};
 }
 
-// Note: registry-backed make_scratch(dev, size) is defined in memory.hpp
-// (requires AllocatorRegistry which lives there).
+/// Device overload: resolves device_index via ctx->device_index(dev).
+inline DeviceScratchBuffer make_scratch(std::shared_ptr<SlabKitContext> ctx,
+                                         const sycl::device& dev,
+                                         std::size_t size = 64 * 1024) {
+    return DeviceScratchBuffer{&ctx->pool_for(dev), size};
+}
 
 }  // namespace slabkit
