@@ -1,0 +1,16 @@
+{
+  "sessionName": "api-spec-lock",
+  "status": "in_progress",
+  "goal": "Review the current project state, write a formal API surface spec document, and apply critical bug fixes so the public API can stabilize.",
+  "currentSubtask": 1,
+  "totalSubtasks": 4,
+  "circuitBreaker": 3,
+  "consecutiveFailures": 0,
+  "createdAt": "2026-03-15",
+  "subtasks": [
+    { "number": 1, "name": "write-api-spec", "status": "in_progress" },
+    { "number": 2, "name": "apply-code-fixes", "status": "pending" },
+    { "number": 3, "name": "remove-scratch-alias", "status": "pending" },
+    { "number": 4, "name": "verify-build-tests", "status": "pending" }
+  ]
+}
