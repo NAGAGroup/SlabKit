@@ -157,17 +157,17 @@ TEST_CASE("make_scratch with sycl::device overload", "[api][scratch]") {
 }
 
 // =============================================================================
-// DeviceScratchBuffer is DeviceScratchMemory
+// DeviceScratchMemory
 // =============================================================================
 
-TEST_CASE("DeviceScratchBuffer is DeviceScratchMemory", "[api][scratch]") {
-    SECTION("type alias is correctly set") {
+TEST_CASE("DeviceScratchMemory is DeviceScratchMemory", "[api][scratch]") {
+    SECTION("type is correctly used") {
         sycl::device dev{sycl::cpu_selector_v};
         auto ctx = slabkit::ContextBuilder()
                        .devices({dev})
                        .slab_size_per_device(4 * 1024 * 1024)
                        .build();
-        slabkit::DeviceScratchBuffer buf = slabkit::make_scratch(ctx, 0);
+        slabkit::DeviceScratchMemory buf = slabkit::make_scratch(ctx, 0);
         REQUIRE(buf.capacity() > 0);
     }
 }

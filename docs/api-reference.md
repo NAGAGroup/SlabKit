@@ -1142,19 +1142,6 @@ DeviceScratchMemory create_scratch() {
 
 ---
 
-### `DeviceScratchBuffer` (Deprecated)
-
-**Header:** `slabkit/scratch.hpp`  
-**Include via:** `#include "slabkit/slabkit.hpp"`
-
-```cpp
-using DeviceScratchBuffer = DeviceScratchMemory;
-```
-
-**Status:** Deprecated. Use `DeviceScratchMemory` directly. This type alias will be removed in a future version.
-
----
-
 ### `DeviceScratchView`
 
 **Header:** `slabkit/scratch.hpp`  
@@ -1204,11 +1191,11 @@ q.parallel_for(1000, [=](size_t i) {
 Factory function to create a pool-backed `DeviceScratchMemory`.
 
 ```cpp
-DeviceScratchBuffer make_scratch(std::shared_ptr<Context> ctx,
+DeviceScratchMemory make_scratch(std::shared_ptr<Context> ctx,
                                   std::size_t device_index,
                                   std::size_t size = 64 * 1024);
 
-DeviceScratchBuffer make_scratch(std::shared_ptr<Context> ctx,
+DeviceScratchMemory make_scratch(std::shared_ptr<Context> ctx,
                                   const sycl::device& dev,
                                   std::size_t size = 64 * 1024);
 ```
@@ -1226,7 +1213,7 @@ Allocates `size` bytes from the device's pool and wraps it in a `DeviceScratchMe
 | Both | `size` | Allocation size in bytes. Default: 64 KB. |
 
 **Return Value**  
-`DeviceScratchBuffer` (alias for `DeviceScratchMemory`) — move-only.
+`DeviceScratchMemory` — move-only.
 
 **Exceptions**  
 - `AllocationError` — pool's slab is exhausted.

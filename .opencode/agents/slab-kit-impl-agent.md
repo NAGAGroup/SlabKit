@@ -1,7 +1,7 @@
 ---
 name: slab-kit-impl-agent
 description: "Applies code fixes and migrations to SlabKit headers, tests, and docs"
-model: github-copilot/claude-haiku-4.6
+model: github-copilot/claude-haiku-4.5
 permission:
   "*": deny
   edit: allow

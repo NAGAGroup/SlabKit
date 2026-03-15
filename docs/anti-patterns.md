@@ -13,7 +13,6 @@ This guide documents ten common mistakes in SlabKit code: from move-semantics er
 | Using `q.submit(handler)` for USM kernels | Unnecessary |
 | Indexing `DeviceView` with the wrong type | Compile Error |
 | Constructing Context from multiple threads | Runtime UB |
-| Using the deprecated `DeviceScratchBuffer` alias | Deprecated |
 | Assuming device memory is zero-initialized | Silent Bug |
 | Ignoring `AllocationError` on pool exhaustion | Silent Bug |
 
@@ -245,27 +244,7 @@ t1.join(); t2.join();
 ### Rule
 > Build `Context` once on the main thread before spawning; all post-construction access is thread-safe.
 
-## Anti-Pattern 8: Using the Deprecated `DeviceScratchBuffer` Alias
-
-### The Problem
-```cpp
-// DeviceScratchBuffer is a deprecated alias for DeviceScratchMemory
-slabkit::DeviceScratchBuffer scratch = slabkit::make_scratch(ctx, 0);
-```
-
-### Why It's Wrong
-`DeviceScratchBuffer` is a type alias (`using DeviceScratchBuffer = DeviceScratchMemory`) that is marked for removal in a future version. Code using it will break without warning when the alias is removed.
-
-### The Fix
-```cpp
-slabkit::DeviceScratchMemory scratch = slabkit::make_scratch(ctx, 0);
-// or: auto scratch = slabkit::make_scratch(ctx, 0);
-```
-
-### Rule
-> Replace all uses of `DeviceScratchBuffer` with `DeviceScratchMemory`.
-
-## Anti-Pattern 9: Assuming Device Memory Is Zero-Initialized
+## Anti-Pattern 8: Assuming Device Memory Is Zero-Initialized
 
 ### The Problem
 ```cpp
@@ -300,7 +279,7 @@ q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
 ### Rule
 > Never assume pool-allocated device memory is zero-initialized; initialize explicitly if needed.
 
-## Anti-Pattern 10: Ignoring `AllocationError` on Pool Exhaustion
+## Anti-Pattern 9: Ignoring `AllocationError` on Pool Exhaustion
 
 ### The Problem
 ```cpp

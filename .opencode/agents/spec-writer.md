@@ -1,7 +1,7 @@
 ---
 name: spec-writer
 description: "Writes formal API specification and design documents for SlabKit"
-model: github-copilot/claude-haiku-4.6
+model: github-copilot/claude-haiku-4.5
 permission:
   "*": deny
   edit: allow
