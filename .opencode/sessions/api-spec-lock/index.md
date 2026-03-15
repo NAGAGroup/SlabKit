@@ -10,7 +10,7 @@
 
 | # | Name | Status | Agent |
 |---|------|--------|-------|
-| 01 | write-api-spec | in_progress | SpecWriter |
-| 02 | apply-code-fixes | pending | SlabKitImplAgent |
+| 01 | write-api-spec | completed | SpecWriter |
+| 02 | apply-code-fixes | in_progress | SlabKitImplAgent |
 | 03 | remove-scratch-alias | pending | SlabKitImplAgent |
 | 04 | verify-build-tests | pending | HW-direct |
