@@ -21,14 +21,14 @@
 
 | # | Status | Description |
 |---|--------|-------------|
-| 01 | 🔲 pending | Read existing README + design doc; produce content mapping and staleness check — **@ContextScout / fast** |
-| 02 | 🔲 pending | Rewrite README.md as lean entry point — **@DocWriter / standard** |
-| 03 | 🔲 pending | Write docs/getting-started.md — **@DocWriter / standard** |
-| 04 | 🔲 pending | Write docs/concepts.md (ownership model, RAII, builder, view safety) — **@DocWriter / standard** |
-| 05 | 🔲 pending | Write docs/api-reference.md (all public types + free functions) — **@DocWriter / standard** |
-| 06 | 🔲 pending | Write docs/patterns.md (best-practice patterns with code examples) — **@DocWriter / standard** |
-| 07 | 🔲 pending | Write docs/anti-patterns.md (footguns + diagnosis + correct fix) — **@DocWriter / standard** |
-| 08 | 🔲 pending | Delete design doc, final commit, session close — **HeadWrench** |
+| 01 | ✅ done | Read existing README + design doc; produce content mapping and staleness check — **@ContextScout / fast** |
+| 02 | ✅ done | Rewrite README.md as lean entry point — **@DocWriter / standard** |
+| 03 | ✅ done | Write docs/getting-started.md — **@DocWriter / standard** |
+| 04 | ✅ done | Write docs/concepts.md (ownership model, RAII, builder, view safety) — **@DocWriter / standard** |
+| 05 | ✅ done | Write docs/api-reference.md (all public types + free functions) — **@DocWriter / standard** |
+| 06 | ✅ done | Write docs/patterns.md (best-practice patterns with code examples) — **@DocWriter / standard** |
+| 07 | ✅ done | Write docs/anti-patterns.md (footguns + diagnosis + correct fix) — **@DocWriter / standard** |
+| 08 | ✅ done | Delete design doc, final commit, session close — **HeadWrench** |
 
 ---
 
@@ -61,7 +61,7 @@ Show the full docs/anti-patterns.md draft. Collect feedback, revise if needed. W
 
 ## Current Focus
 
-Session planned. Awaiting user "start" command to begin subtask 01.
+All subtasks complete. Session closed.
 
 ---
 

@@ -2,8 +2,8 @@
   "name": "rewrite-user-docs",
   "goal": "Rewrite README.md as a lean entry point and write five user-facing documentation pages under docs/ covering getting started, concepts, API reference, patterns, and anti-patterns.",
   "created": "2026-03-10",
-  "status": "in_progress",
-  "currentSubtask": 0,
+  "status": "completed",
+  "currentSubtask": 8,
   "subtaskCount": 8,
   "architectEnabled": false,
   "circuitBreakerThreshold": 3,
@@ -12,49 +12,49 @@
       "id": "01",
       "name": "read-existing-docs",
       "description": "Read existing README.md and design doc; produce a content mapping and staleness check",
-      "status": "pending"
+      "status": "completed"
     },
     {
       "id": "02",
       "name": "rewrite-readme",
       "description": "Condense README.md to a lean entry point linking to docs/",
-      "status": "pending"
+      "status": "completed"
     },
     {
       "id": "03",
       "name": "write-getting-started",
       "description": "Write docs/getting-started.md",
-      "status": "pending"
+      "status": "completed"
     },
     {
       "id": "04",
       "name": "write-concepts",
       "description": "Write docs/concepts.md covering the ownership model and core abstractions",
-      "status": "pending"
+      "status": "completed"
     },
     {
       "id": "05",
       "name": "write-api-reference",
       "description": "Write docs/api-reference.md covering all public types and free functions",
-      "status": "pending"
+      "status": "completed"
     },
     {
       "id": "06",
       "name": "write-patterns",
       "description": "Write docs/patterns.md covering best-practice usage patterns with code examples",
-      "status": "pending"
+      "status": "completed"
     },
     {
       "id": "07",
       "name": "write-anti-patterns",
       "description": "Write docs/anti-patterns.md covering footguns and incorrect usage with diagnosis and fix",
-      "status": "pending"
+      "status": "completed"
     },
     {
       "id": "08",
       "name": "cleanup-and-close",
       "description": "Delete docs/design/slabkit-v0.1-design.md (and empty design/ dir), write closing note, final session commit",
-      "status": "pending"
+      "status": "completed"
     }
   ]
 }
