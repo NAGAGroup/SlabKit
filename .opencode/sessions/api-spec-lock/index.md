@@ -2,7 +2,7 @@
 
 **Goal:** Review the current project state, write a formal API surface spec document, and apply critical bug fixes so the public API can stabilize.
 
-**Status:** in_progress
+**Status:** completed
 
 **Circuit Breaker:** 3 consecutive failures
 
@@ -12,5 +12,5 @@
 |---|------|--------|-------|
 | 01 | write-api-spec | completed | SpecWriter |
 | 02 | apply-code-fixes | completed | SlabKitImplAgent |
-| 03 | remove-scratch-alias | in_progress | SlabKitImplAgent |
-| 04 | verify-build-tests | pending | HW-direct |
+| 03 | remove-scratch-alias | completed | SlabKitImplAgent |
+| 04 | verify-build-tests | completed | HW-direct |
