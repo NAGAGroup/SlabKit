@@ -205,13 +205,13 @@ private:
         for (int d = N - 2; d >= 0; --d)
             strides[d] = strides[d + 1] * range_[d + 1];
 
-        size_t linear_offset = 0;
-        for (int d = 0; d < N; ++d)
-            linear_offset += offsets[d] * strides[d];
-
         for (int d = 0; d < N; ++d)
             assert(offsets[d] + sub_range[d] <= range_[d] &&
                    "subview exceeds array bounds");
+
+        size_t linear_offset = 0;
+        for (int d = 0; d < N; ++d)
+            linear_offset += offsets[d] * strides[d];
 
         return DeviceSubView<const T, N>{ptr_.get() + linear_offset, sub_range, strides};
     }
@@ -264,7 +264,7 @@ private:
 
 /// Explicit context factory: allocate from a Context pool by device index.
 template <typename T, int N>
-DeviceArray<T, N> make_device_array(sycl::range<N> range,
+[[nodiscard]] DeviceArray<T, N> make_device_array(sycl::range<N> range,
                                      std::shared_ptr<Context> ctx,
                                      size_t device_index) {
     return DeviceArray<T, N>::from_pool(range, ctx, device_index);
@@ -272,7 +272,7 @@ DeviceArray<T, N> make_device_array(sycl::range<N> range,
 
 /// Device overload: resolves device_index automatically via ctx->device_index(dev).
 template <typename T, int N>
-DeviceArray<T, N> make_device_array(sycl::range<N> range,
+[[nodiscard]] DeviceArray<T, N> make_device_array(sycl::range<N> range,
                                      std::shared_ptr<Context> ctx,
                                      const sycl::device& dev) {
     return DeviceArray<T, N>::from_pool(range, ctx, ctx->device_index(dev));
@@ -316,44 +316,46 @@ DeviceArray<T, N> make_device_array(sycl::range<N> range,
 // ─────────────────────────────────────────────────────────────────────────────
 
 template <typename T, int N>
-sycl::event copy_to_host(const DeviceArray<T, N>& src, T* dst,
+[[nodiscard]] sycl::event copy_to_host(const DeviceArray<T, N>& src, T* dst,
                          sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(dst != nullptr);
     return q.memcpy(dst, src.data(), src.byte_size(), deps);
 }
 
 template <typename T, int N>
-sycl::event copy_to_host(DeviceView<T, N> src, T* dst,
+[[nodiscard]] sycl::event copy_to_host(DeviceView<T, N> src, T* dst,
                          sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(dst != nullptr);
     return q.memcpy(dst, src.data(), src.byte_size(), deps);
 }
 
 template <typename T, int N>
-sycl::event copy_to_host(DeviceView<const T, N> src, T* dst,
+[[nodiscard]] sycl::event copy_to_host(DeviceView<const T, N> src, T* dst,
                          sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(dst != nullptr);
     return q.memcpy(dst, src.data(), src.byte_size(), deps);
 }
 
 template <typename T, int N>
-sycl::event copy_to_device(const T* src, DeviceArray<T, N>& dst,
+[[nodiscard]] sycl::event copy_to_device(const T* src, DeviceArray<T, N>& dst,
                             sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(src != nullptr);
     return q.memcpy(dst.data(), src, dst.byte_size(), deps);
 }
 
 template <typename T, int N>
-sycl::event copy_to_device(const T* src, DeviceView<T, N> dst,
+[[nodiscard]] sycl::event copy_to_device(const T* src, DeviceView<T, N> dst,
                             sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(src != nullptr);
     return q.memcpy(dst.data(), src, dst.byte_size(), deps);
 }
 
 template <typename T, int N>
-sycl::event copy(const DeviceArray<T, N>& src, DeviceArray<T, N>& dst,
+[[nodiscard]] sycl::event copy(const DeviceArray<T, N>& src, DeviceArray<T, N>& dst,
                  sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(src.size() == dst.size() && "array size mismatch");
+    assert(src.device_index() == dst.device_index() &&
+           "copy(DeviceArray, DeviceArray): src and dst must be on the same device");
     return q.memcpy(dst.data(), src.data(), src.byte_size(), deps);
 }
 
@@ -378,7 +380,7 @@ sycl::event copy(const DeviceArray<T, N>& src, DeviceArray<T, N>& dst,
 //
 
 template <typename T, int N>
-sycl::event copy_to_host(DeviceSubView<T, N> src, T* dst,
+[[nodiscard]] sycl::event copy_to_host(DeviceSubView<T, N> src, T* dst,
                          sycl::queue& q, DeviceScratchMemory& scratch,
                          const std::vector<sycl::event>& deps = {}) {
     assert(dst != nullptr);
@@ -404,7 +406,7 @@ sycl::event copy_to_host(DeviceSubView<T, N> src, T* dst,
 }
 
 template <typename T, int N>
-sycl::event copy_to_host(DeviceSubView<const T, N> src, T* dst,
+[[nodiscard]] sycl::event copy_to_host(DeviceSubView<const T, N> src, T* dst,
                          sycl::queue& q, DeviceScratchMemory& scratch,
                          const std::vector<sycl::event>& deps = {}) {
     assert(dst != nullptr);
@@ -425,7 +427,7 @@ sycl::event copy_to_host(DeviceSubView<const T, N> src, T* dst,
 }
 
 template <typename T, int N>
-sycl::event copy_to_device(const T* src, DeviceSubView<T, N> dst,
+[[nodiscard]] sycl::event copy_to_device(const T* src, DeviceSubView<T, N> dst,
                             sycl::queue& q, DeviceScratchMemory& scratch,
                             const std::vector<sycl::event>& deps = {}) {
     assert(src != nullptr);
@@ -455,7 +457,7 @@ sycl::event copy_to_device(const T* src, DeviceSubView<T, N> dst,
 
 // DeviceSubView → DeviceSubView
 template <typename T, int N>
-sycl::event copy(DeviceSubView<T, N> src, DeviceSubView<T, N> dst,
+[[nodiscard]] sycl::event copy(DeviceSubView<T, N> src, DeviceSubView<T, N> dst,
                  sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(src.size() == dst.size() && "subview size mismatch");
     return q.submit([&](sycl::handler& h) {
@@ -470,7 +472,7 @@ sycl::event copy(DeviceSubView<T, N> src, DeviceSubView<T, N> dst,
 
 // DeviceSubView → DeviceArray (strided src, contiguous dst)
 template <typename T, int N>
-sycl::event copy(DeviceSubView<T, N> src, DeviceArray<T, N>& dst,
+[[nodiscard]] sycl::event copy(DeviceSubView<T, N> src, DeviceArray<T, N>& dst,
                  sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(src.size() == dst.size() && "size mismatch");
     return q.submit([&](sycl::handler& h) {
@@ -486,7 +488,7 @@ sycl::event copy(DeviceSubView<T, N> src, DeviceArray<T, N>& dst,
 
 // DeviceArray → DeviceSubView (contiguous src, strided dst)
 template <typename T, int N>
-sycl::event copy(const DeviceArray<T, N>& src, DeviceSubView<T, N> dst,
+[[nodiscard]] sycl::event copy(const DeviceArray<T, N>& src, DeviceSubView<T, N> dst,
                  sycl::queue& q, const std::vector<sycl::event>& deps = {}) {
     assert(src.size() == dst.size() && "size mismatch");
     return q.submit([&](sycl::handler& h) {

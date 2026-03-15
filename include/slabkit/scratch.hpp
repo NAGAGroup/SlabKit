@@ -61,14 +61,14 @@ struct DeviceScratchView {
 /// \param size         Bytes to allocate (default: 64 KB).
 /// \throws std::out_of_range if device_index is invalid.
 /// \throws AllocationError if the pool cannot satisfy the allocation.
-inline DeviceScratchBuffer make_scratch(std::shared_ptr<Context> ctx,
+[[nodiscard]] inline DeviceScratchBuffer make_scratch(std::shared_ptr<Context> ctx,
                                          std::size_t device_index,
                                          std::size_t size = 64 * 1024) {
     return DeviceScratchBuffer{&ctx->pool_at(device_index), size};
 }
 
 /// Device overload: resolves device_index via ctx->device_index(dev).
-inline DeviceScratchBuffer make_scratch(std::shared_ptr<Context> ctx,
+[[nodiscard]] inline DeviceScratchBuffer make_scratch(std::shared_ptr<Context> ctx,
                                          const sycl::device& dev,
                                          std::size_t size = 64 * 1024) {
     return DeviceScratchBuffer{&ctx->pool_for(dev), size};

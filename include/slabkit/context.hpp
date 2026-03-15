@@ -126,42 +126,37 @@ struct Context : std::enable_shared_from_this<Context> {
     // =========================================================================
 
     /// Creates an in-order queue for the given device.
-    sycl::queue make_in_order_queue(const sycl::device& dev) const {
+    [[nodiscard]] sycl::queue make_in_order_queue(const sycl::device& dev) const {
         const auto& ctx = context_for(dev);
         return sycl::queue(ctx, dev, sycl::property::queue::in_order());
     }
 
     /// Creates an out-of-order queue for the given device.
-    sycl::queue make_out_of_order_queue(const sycl::device& dev) const {
+    [[nodiscard]] sycl::queue make_out_of_order_queue(const sycl::device& dev) const {
         const auto& ctx = context_for(dev);
         return sycl::queue(ctx, dev);
     }
 
     /// Creates a queue with a fully custom property list.
-    sycl::queue make_queue_with_props(const sycl::device& dev,
+    [[nodiscard]] sycl::queue make_queue_with_props(const sycl::device& dev,
                                        const sycl::property_list& props) const {
         const auto& ctx = context_for(dev);
         return sycl::queue(ctx, dev, props);
     }
 
     // =========================================================================
-    // Move semantics (non-copyable)
+    // Move semantics (non-copyable, non-movable)
     // =========================================================================
+    //
+    // Context contains std::mutex which is not movable. Context is always
+    // managed via shared_ptr and never moved in practice. Both move constructor
+    // and move assignment are explicitly deleted to make this invariant clear.
+    //
 
     Context(const Context&)               = delete;
     Context& operator=(const Context&)    = delete;
-
-    Context(Context&& other) noexcept
-        : std::enable_shared_from_this<Context>(std::move(other))
-        , platform_contexts(std::move(other.platform_contexts))
-        , devices(std::move(other.devices))
-        , device_to_platform(std::move(other.device_to_platform))
-        , device_slab_sizes(std::move(other.device_slab_sizes))
-        , pools(std::move(other.pools))
-        , node_size_(other.node_size_)
-    {}
-
-    Context& operator=(Context&&) = delete;
+    Context(Context&&)                    = delete;
+    Context& operator=(Context&&)         = delete;
 
     Context() = default;
 };
@@ -220,16 +215,16 @@ public:
             }
         }
 
-        Context result;
-        result.devices = devices_;
-        result.device_to_platform.resize(devices_.size());
-        result.device_slab_sizes.resize(devices_.size(),
+        auto result = std::shared_ptr<Context>(new Context());
+        result->devices = devices_;
+        result->device_to_platform.resize(devices_.size());
+        result->device_slab_sizes.resize(devices_.size(),
                                         slab_size_ > 0 ? slab_size_ : (64 * 1024 * 1024));
-        result.pools.resize(devices_.size());
-        result.node_size_ = node_size_;
+        result->pools.resize(devices_.size());
+        result->node_size_ = node_size_;
 
         for (const auto& dev_group : devices_by_platform)
-            result.platform_contexts.push_back(sycl::context(dev_group));
+            result->platform_contexts.push_back(sycl::context(dev_group));
 
         for (size_t i = 0; i < devices_.size(); ++i) {
             const sycl::platform plat    = devices_[i].get_platform();
@@ -240,10 +235,10 @@ public:
                                    [backend, &name](const auto& key) {
                                        return key.first == backend && key.second == name;
                                    });
-            result.device_to_platform[i] = std::distance(platform_keys.begin(), it);
+            result->device_to_platform[i] = std::distance(platform_keys.begin(), it);
         }
 
-        return std::shared_ptr<Context>(new Context(std::move(result)));
+        return result;
     }
 
 private:

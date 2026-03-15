@@ -59,7 +59,7 @@ using unique_device_ptr = std::unique_ptr<T, DeviceUSMPoolDeleter>;
 /// Returns unique_device_ptr<T> with DeviceUSMPoolDeleter holding
 /// weak_ptr<Context>.
 template <typename T>
-unique_device_ptr<T> malloc_device(size_t count,
+[[nodiscard]] unique_device_ptr<T> malloc_device(size_t count,
                                    std::shared_ptr<Context> ctx,
                                    size_t device_index) {
     auto &pool = ctx->pool_at(device_index);
@@ -74,7 +74,7 @@ unique_device_ptr<T> malloc_device(size_t count,
 /// Allocate count elements of T from a Context pool for a given device.
 /// Resolves device index via ctx->device_index(dev).
 template <typename T>
-unique_device_ptr<T> malloc_device(size_t count,
+[[nodiscard]] unique_device_ptr<T> malloc_device(size_t count,
                                    std::shared_ptr<Context> ctx,
                                    const sycl::device& dev) {
     return malloc_device<T>(count, ctx, ctx->device_index(dev));
