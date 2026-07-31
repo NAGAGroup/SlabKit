@@ -37,7 +37,7 @@ q.parallel_for(arr.get_range(), [=](sycl::id<2> id) {
 SlabKit is a [pixi](https://pixi.sh) **source package**. From a pixi
 project: `slabkit = { git = "https://github.com/NAGAGroup/SlabKit.git", tag = "..." }`,
 then `find_package(slabkit CONFIG REQUIRED)` → `naga::slabkit::slabkit`. From a
-non-pixi project: `pixi exec pixi-pack --environment pack --create-executable`
+non-pixi project: `pixi exec pixi-pack --create-executable`
 produces a self-extracting archive (`./environment.sh` → `./env`, no
 pixi/conda needed on the target); point `CMAKE_PREFIX_PATH` at the unpacked
 env and use the same `find_package`. The pixi pipeline is the only officially
