@@ -67,3 +67,15 @@ slabkit = { path = "." }
 [environments.dev]
 features = ["base", "opencl", "level-zero", "cuda", "amd", "dev"]
 solve-group = "default"
+
+# ------------------------------------------------------------------------------
+# Pack environment: self-includes the built package for non-pixi consumers —
+# `pixi exec pixi-pack --environment pack --create-executable` → self-
+# extracting env; CMAKE_PREFIX_PATH=./env + find_package(slabkit CONFIG).
+# ------------------------------------------------------------------------------
+[feature.pack.dependencies]
+slabkit = { path = "." }
+
+[environments.pack]
+features = ["base", "pack"]
+solve-group = "default"
