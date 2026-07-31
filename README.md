@@ -32,6 +32,17 @@ q.parallel_for(arr.get_range(), [=](sycl::id<2> id) {
 // Array destroyed → memory automatically returned to pool
 ```
 
+## Using SlabKit
+
+SlabKit is a [pixi](https://pixi.sh) **source package**. From a pixi
+project: `slabkit = { git = "https://github.com/NAGAGroup/SlabKit.git", tag = "..." }`,
+then `find_package(slabkit CONFIG REQUIRED)` → `slabkit::slabkit`. From a
+non-pixi project: `pixi publish --target-channel ./channel` builds an
+indexed local conda channel; point `CMAKE_PREFIX_PATH` at the install and
+use the same `find_package`. The pixi pipeline is the only officially
+supported build/consumption path (hermetic conda builds are the point);
+issues specific to FetchContent/CPM-style embedding will be closed.
+
 ## Documentation
 
 | Page | Description |
