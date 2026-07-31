@@ -42,6 +42,22 @@ q.parallel_for(arr.get_range(), [=](sycl::id<2> id) {
 | [Patterns](docs/patterns.md) | Best-practice usage patterns with examples |
 | [Anti-Patterns](docs/anti-patterns.md) | Common mistakes, diagnosis, and fixes |
 
+## Status & known limitations
+
+SlabKit is used in production by [CospanMDAO](https://github.com/NAGAGroup/CospanMDAO)
+and the research projects built on it; the ownership model and pool allocator
+are stable and exercised daily. A 2026 code audit left a few known, deliberate
+limitations on record (all benign for the primary usage pattern of one
+program-lifetime `Context`):
+
+- Slabs are not returned to the SYCL runtime when a `Context` is destroyed —
+  irrelevant for program-lifetime contexts, a leak if you create and destroy
+  many contexts in one process.
+- `DeviceScratchMemory` holds a raw pool pointer; keep the `Context` alive
+  while scratch is in use (the docs' stronger lifetime claim is aspirational).
+- Pool-corruption assertions compile out in release builds; use the debug
+  preset when hunting allocator issues.
+
 ## License
 
-See [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE) for details.

@@ -1,5 +1,5 @@
 [workspace]
-authors = ["Jack Myers <jackhmyers97@gmail.com>"]
+authors = ["Jack Myers <jack@myersjack.dev>"]
 channels = ["https://prefix.dev/code-accelerate", "conda-forge"]
 name = "slabkit"
 platforms = ["linux-64"]
