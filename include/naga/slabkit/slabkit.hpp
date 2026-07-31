@@ -7,10 +7,10 @@
 // Includes all public SlabKit headers in dependency order.
 //
 
-#include "slabkit/error.hpp"
-#include "slabkit/context.hpp"
-#include "slabkit/memory.hpp"
-#include "slabkit/scratch.hpp"
-#include "slabkit/array.hpp"
+#include "naga/slabkit/error.hpp"
+#include "naga/slabkit/context.hpp"
+#include "naga/slabkit/memory.hpp"
+#include "naga/slabkit/scratch.hpp"
+#include "naga/slabkit/array.hpp"
 
-namespace slabkit {}  // Ensure namespace is available
+namespace naga::slabkit {}  // Ensure namespace is available

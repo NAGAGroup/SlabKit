@@ -46,9 +46,9 @@
 
 #include <sycl/sycl.hpp>
 
-#include "slabkit/error.hpp"
+#include "naga/slabkit/error.hpp"
 
-namespace slabkit {
+namespace naga::slabkit {
 
 class DeviceMemoryPool {
 public:
@@ -447,4 +447,4 @@ private:
     mutable std::mutex mutex_;  // protects allocation/deallocation operations
 };
 
-} // namespace slabkit
+} // namespace naga::slabkit

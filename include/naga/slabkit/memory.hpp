@@ -20,10 +20,10 @@
 
 #include <sycl/sycl.hpp>
 
-#include "slabkit/context.hpp"
-#include "slabkit/detail/device_pool.hpp"
+#include "naga/slabkit/context.hpp"
+#include "naga/slabkit/detail/device_pool.hpp"
 
-namespace slabkit {
+namespace naga::slabkit {
 
 // =============================================================================
 // DeviceUSMPoolDeleter — non-templated deleter for USM pointers allocated from
@@ -80,4 +80,4 @@ template <typename T>
     return malloc_device<T>(count, ctx, ctx->device_index(dev));
 }
 
-} // namespace slabkit
+} // namespace naga::slabkit

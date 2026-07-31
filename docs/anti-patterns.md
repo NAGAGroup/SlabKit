@@ -20,7 +20,7 @@ This guide documents ten common mistakes in SlabKit code: from move-semantics er
 
 ### The Problem
 ```cpp
-auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
 // ERROR: DeviceArray is move-only; copy constructor is deleted
 q.parallel_for(arr.get_range(), [=](sycl::id<1> id) {
     arr[id] = 0.0f;  // Won't compile: copy of move-only type
@@ -32,7 +32,7 @@ q.parallel_for(arr.get_range(), [=](sycl::id<1> id) {
 
 ### The Fix
 ```cpp
-auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
 auto view = arr.view();  // Trivially-copyable; safe to capture
 q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
     view[id] = 0.0f;
@@ -47,9 +47,9 @@ q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
 
 ### The Problem
 ```cpp
-slabkit::DeviceView<float, 1> view;
+naga::slabkit::DeviceView<float, 1> view;
 {
-    auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
+    auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
     view = arr.view();
 }  // arr destroyed here; pool nodes returned; view now dangling
 
@@ -64,7 +64,7 @@ q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
 
 ### The Fix
 ```cpp
-auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
 auto view = arr.view();
 q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
     view[id] = 1.0f;
@@ -79,10 +79,10 @@ q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
 
 ### The Problem
 ```cpp
-slabkit::DeviceArray<float, 1> arr;
+naga::slabkit::DeviceArray<float, 1> arr;
 {
-    auto ctx = slabkit::ContextBuilder().devices({dev}).build();
-    arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
+    auto ctx = naga::slabkit::ContextBuilder().devices({dev}).build();
+    arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
 }  // ctx destroyed here; shared_ptr refcount hits 0
 
 // arr's destructor fires later:
@@ -96,8 +96,8 @@ slabkit::DeviceArray<float, 1> arr;
 ### The Fix
 ```cpp
 // Keep ctx alive at least as long as any array allocated from it
-auto ctx = slabkit::ContextBuilder().devices({dev}).build();
-auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
+auto ctx = naga::slabkit::ContextBuilder().devices({dev}).build();
+auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
 // ... use arr ...
 // arr destroyed before ctx goes out of scope
 ```
@@ -109,7 +109,7 @@ auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
 
 ### The Problem
 ```cpp
-auto scratch = slabkit::make_scratch(ctx, 0, 65536);
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 65536);
 auto mark = scratch.top();
 void* buf = scratch.allocate(4096);
 
@@ -130,7 +130,7 @@ void* buf2 = scratch.allocate(4096);  // Returns same address as buf
 
 ### The Fix
 ```cpp
-auto scratch = slabkit::make_scratch(ctx, 0, 65536);
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 65536);
 auto mark = scratch.top();
 void* buf = scratch.allocate(4096);
 
@@ -178,7 +178,7 @@ q.parallel_for(view.get_range(), [=](sycl::id<2> id) {
 
 ### The Problem
 ```cpp
-auto arr = slabkit::make_device_array<float, 2>(sycl::range<2>{64, 64}, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 2>(sycl::range<2>{64, 64}, ctx, 0);
 auto view = arr.view();
 q.parallel_for(view.get_range(), [=](sycl::id<2> id) {
     // WRONG: operator() expects 2 ints, not a sycl::id<2>
@@ -194,7 +194,7 @@ q.parallel_for(view.get_range(), [=](sycl::id<2> id) {
 
 ### The Fix
 ```cpp
-auto arr = slabkit::make_device_array<float, 2>(sycl::range<2>{64, 64}, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 2>(sycl::range<2>{64, 64}, ctx, 0);
 auto view = arr.view();
 q.parallel_for(view.get_range(), [=](sycl::id<2> id) {
     view[id] = 1.0f;           // Correct: operator[] takes sycl::id<N>
@@ -211,11 +211,11 @@ q.parallel_for(view.get_range(), [=](sycl::id<2> id) {
 ```cpp
 // Two threads each build their own context concurrently — UNSAFE
 std::thread t1([&] {
-    auto ctx1 = slabkit::ContextBuilder().devices({dev}).build();
+    auto ctx1 = naga::slabkit::ContextBuilder().devices({dev}).build();
     // ...
 });
 std::thread t2([&] {
-    auto ctx2 = slabkit::ContextBuilder().devices({dev}).build();
+    auto ctx2 = naga::slabkit::ContextBuilder().devices({dev}).build();
     // ...
 });
 t1.join(); t2.join();
@@ -227,7 +227,7 @@ t1.join(); t2.join();
 ### The Fix
 ```cpp
 // Build once on the main thread, before spawning
-auto ctx = slabkit::ContextBuilder().devices({dev}).build();
+auto ctx = naga::slabkit::ContextBuilder().devices({dev}).build();
 
 std::thread t1([ctx] {
     // Pool access and queue creation are thread-safe
@@ -248,7 +248,7 @@ t1.join(); t2.join();
 
 ### The Problem
 ```cpp
-auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
 
 // BUG: arr contains garbage — pool memory is not zeroed
 auto view = arr.view();
@@ -263,11 +263,11 @@ q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
 
 ### The Fix
 ```cpp
-auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{1024}, ctx, 0);
 
 // Explicitly initialize if you need deterministic values
 std::vector<float> zeros(arr.size(), 0.0f);
-slabkit::copy_to_device(zeros.data(), arr, q).wait();
+naga::slabkit::copy_to_device(zeros.data(), arr, q).wait();
 
 // Now arr is zeroed
 auto view = arr.view();
@@ -284,7 +284,7 @@ q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
 ### The Problem
 ```cpp
 // No try/catch — if the pool is full, this throws and terminates
-auto arr = slabkit::make_device_array<float, 1>(
+auto arr = naga::slabkit::make_device_array<float, 1>(
     sycl::range<1>{1024 * 1024 * 64},  // 256 MB of float
     ctx,
     0
@@ -292,26 +292,26 @@ auto arr = slabkit::make_device_array<float, 1>(
 ```
 
 ### Why It's Wrong
-If the slab is exhausted (or the pool is fragmented), `make_device_array()` throws `slabkit::AllocationError`. Without a catch block, this propagates as an uncaught exception and terminates the program. In production code — especially loops that allocate many arrays — silent termination is unacceptable.
+If the slab is exhausted (or the pool is fragmented), `make_device_array()` throws `naga::slabkit::AllocationError`. Without a catch block, this propagates as an uncaught exception and terminates the program. In production code — especially loops that allocate many arrays — silent termination is unacceptable.
 
 ### The Fix
 ```cpp
 try {
-    auto arr = slabkit::make_device_array<float, 1>(
+    auto arr = naga::slabkit::make_device_array<float, 1>(
         sycl::range<1>{1024 * 1024 * 64},
         ctx,
         0
     );
     // ... use arr ...
-} catch (const slabkit::AllocationError& e) {
+} catch (const naga::slabkit::AllocationError& e) {
     switch (e.reason()) {
-    case slabkit::AllocationError::Reason::PoolExhausted:
+    case naga::slabkit::AllocationError::Reason::PoolExhausted:
         // Slab is full; wait for other arrays to be freed, or resize the slab
         break;
-    case slabkit::AllocationError::Reason::Fragmented:
+    case naga::slabkit::AllocationError::Reason::Fragmented:
         // Slab has space but no contiguous region; compact or resize
         break;
-    case slabkit::AllocationError::Reason::ScratchFull:
+    case naga::slabkit::AllocationError::Reason::ScratchFull:
         // Scratch slab is full; reset or use a larger scratch
         break;
     }

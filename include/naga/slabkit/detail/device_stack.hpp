@@ -27,10 +27,10 @@
 #include <new>
 #include <stdexcept>
 
-#include "slabkit/error.hpp"
-#include "slabkit/detail/device_pool.hpp"
+#include "naga/slabkit/error.hpp"
+#include "naga/slabkit/detail/device_pool.hpp"
 
-namespace slabkit {
+namespace naga::slabkit {
 
 class DeviceScratchMemory {
 public:
@@ -204,4 +204,4 @@ private:
     std::size_t                       offset_      = 0;        // current bump position (bytes from slab_base_)
 };
 
-} // namespace slabkit
+} // namespace naga::slabkit

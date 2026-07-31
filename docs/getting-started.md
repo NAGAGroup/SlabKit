@@ -15,7 +15,7 @@ Build a Context using `ContextBuilder`:
 sycl::device dev{sycl::cpu_selector_v};
 
 // Build a Context for that device
-auto ctx = slabkit::ContextBuilder()
+auto ctx = naga::slabkit::ContextBuilder()
     .devices({dev})
     .node_size(1024)                    // granularity of pool allocations
     .slab_size_per_device(64 * 1024 * 1024)  // 64 MB per device
@@ -30,7 +30,7 @@ Once you have a Context, allocate a device array using `make_device_array`:
 
 ```cpp
 // Allocate 1024 floats on device 0
-auto arr = slabkit::make_device_array<float, 1>(
+auto arr = naga::slabkit::make_device_array<float, 1>(
     sycl::range<1>{1024},
     ctx,
     0  // device index
@@ -79,7 +79,7 @@ For a deeper dive on ownership, RAII, and safe view patterns, see [concepts.md](
 Create a scratch buffer using `make_scratch`:
 
 ```cpp
-auto scratch = slabkit::make_scratch(ctx, 0, 2048);  // 2048 bytes for device 0
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 2048);  // 2048 bytes for device 0
 ```
 
 The core API:
@@ -91,7 +91,7 @@ The core API:
 The canonical pattern is scope-based unwinding: save the position before a call that needs temporary memory, then restore afterward:
 
 ```cpp
-auto scratch = slabkit::make_scratch(ctx, 0, 8192);
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 8192);
 
 // First call
 auto mark1 = scratch.top();
@@ -107,7 +107,7 @@ scratch.unwind(mark2);
 Inside `do_some_work`, you might allocate a temporary buffer:
 
 ```cpp
-void do_some_work(slabkit::DeviceScratchMemory& scratch /*, ... */) {
+void do_some_work(naga::slabkit::DeviceScratchMemory& scratch /*, ... */) {
     // Bump-allocate a temporary device buffer
     float* tmp = static_cast<float*>(
         scratch.allocate(256 * sizeof(float), alignof(float))
@@ -132,14 +132,14 @@ SlabKit provides async copy functions in `<slabkit/memory.hpp>` (included via th
 
 ```cpp
 // Copy from host to device
-sycl::event ev_h2d = slabkit::copy_to_device(
+sycl::event ev_h2d = naga::slabkit::copy_to_device(
     host_ptr,  // const T*
     arr,       // DeviceArray<T, N>&
     q          // sycl::queue&
 );
 
 // Copy from device back to host
-sycl::event ev_d2h = slabkit::copy_to_host(
+sycl::event ev_d2h = naga::slabkit::copy_to_host(
     arr,       // const DeviceArray<T, N>&
     host_ptr,  // T*
     q,         // sycl::queue&
@@ -159,11 +159,11 @@ std::vector<float> host_data(1024);
 std::iota(host_data.begin(), host_data.end(), 0.f);
 
 // Allocate device array
-auto arr = slabkit::make_device_array<float, 1>(
+auto arr = naga::slabkit::make_device_array<float, 1>(
     sycl::range<1>{1024}, ctx, 0);
 
 // Copy to device
-auto ev_h2d = slabkit::copy_to_device(host_data.data(), arr, q);
+auto ev_h2d = naga::slabkit::copy_to_device(host_data.data(), arr, q);
 
 // Get a view before submitting — DeviceView is trivially copyable
 auto view = arr.view();
@@ -175,7 +175,7 @@ auto ev_kernel = q.parallel_for(arr.get_range(), [=](sycl::id<1> id) {
 
 // Copy result back
 std::vector<float> host_result(1024);
-auto ev_d2h = slabkit::copy_to_host(arr, host_result.data(), q, {ev_kernel});
+auto ev_d2h = naga::slabkit::copy_to_host(arr, host_result.data(), q, {ev_kernel});
 
 ev_d2h.wait();  // wait for all work to complete
 ```

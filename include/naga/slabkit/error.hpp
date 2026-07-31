@@ -11,7 +11,7 @@
 #include <exception>
 #include <string>
 
-namespace slabkit {
+namespace naga::slabkit {
 
 // =============================================================================
 // AllocationError — exception for memory allocation failures
@@ -37,4 +37,4 @@ private:
     std::string msg_;
 };
 
-}  // namespace slabkit
+}  // namespace naga::slabkit

@@ -9,8 +9,8 @@ SYCL's Unified Shared Memory (USM) offers powerful abstraction but requires care
 ## Quick Start
 
 ```cpp
-#include "slabkit/slabkit.hpp"
-using namespace slabkit;
+#include <naga/slabkit/slabkit.hpp>
+using namespace naga::slabkit;
 
 // Create a context (manages devices and memory pools)
 auto ctx = ContextBuilder{}
@@ -36,7 +36,7 @@ q.parallel_for(arr.get_range(), [=](sycl::id<2> id) {
 
 SlabKit is a [pixi](https://pixi.sh) **source package**. From a pixi
 project: `slabkit = { git = "https://github.com/NAGAGroup/SlabKit.git", tag = "..." }`,
-then `find_package(slabkit CONFIG REQUIRED)` → `slabkit::slabkit`. From a
+then `find_package(slabkit CONFIG REQUIRED)` → `naga::slabkit::slabkit`. From a
 non-pixi project: `pixi exec pixi-pack --environment pack --create-executable`
 produces a self-extracting archive (`./environment.sh` → `./env`, no
 pixi/conda needed on the target); point `CMAKE_PREFIX_PATH` at the unpacked

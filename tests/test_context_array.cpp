@@ -2,13 +2,13 @@
 #include <vector>
 #include <array>
 
-#include "slabkit/array.hpp"
-#include "slabkit/context.hpp"
+#include "naga/slabkit/array.hpp"
+#include "naga/slabkit/context.hpp"
 
 // Helper: create a Context for testing
-inline std::shared_ptr<slabkit::Context> make_test_context() {
+inline std::shared_ptr<naga::slabkit::Context> make_test_context() {
     sycl::device dev{sycl::cpu_selector_v};
-    return slabkit::ContextBuilder()
+    return naga::slabkit::ContextBuilder()
             .devices({dev})
             .node_size(1024)
             .slab_size_per_device(4 * 1024 * 1024)
@@ -21,7 +21,7 @@ inline std::shared_ptr<slabkit::Context> make_test_context() {
 
 TEST_CASE("DeviceArray from_pool move-only construction", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::DeviceArray<float, 1>::from_pool(sycl::range<1>{8}, ctx, 0);
+    auto arr = naga::slabkit::DeviceArray<float, 1>::from_pool(sycl::range<1>{8}, ctx, 0);
     
     REQUIRE(arr.data() != nullptr);
     REQUIRE(arr.size() == 8);
@@ -29,21 +29,21 @@ TEST_CASE("DeviceArray from_pool move-only construction", "[array][device_array]
 
 TEST_CASE("DeviceArray from_pool round-trip via sync", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{4}, ctx, 0);
+    auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{4}, ctx, 0);
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     std::vector<float> src = {1.0f, 2.0f, 3.0f, 4.0f};
-    slabkit::copy_to_device(src.data(), arr.view(), q).wait();
+    naga::slabkit::copy_to_device(src.data(), arr.view(), q).wait();
     
     std::vector<float> dst(4);
-    slabkit::copy_to_host(arr, dst.data(), q).wait();
+    naga::slabkit::copy_to_host(arr, dst.data(), q).wait();
     
     REQUIRE(dst == src);
 }
 
 TEST_CASE("DeviceArray view() returns correct range", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::make_device_array<int, 2>(sycl::range<2>{3, 4}, ctx, 0);
+    auto arr = naga::slabkit::make_device_array<int, 2>(sycl::range<2>{3, 4}, ctx, 0);
     
     auto v = arr.view();
     REQUIRE(v.get_range() == sycl::range<2>{3, 4});
@@ -52,7 +52,7 @@ TEST_CASE("DeviceArray view() returns correct range", "[array][device_array]") {
 
 TEST_CASE("DeviceArray const view has correct size", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{16}, ctx, 0);
+    auto arr = naga::slabkit::make_device_array<int, 1>(sycl::range<1>{16}, ctx, 0);
     
     auto cv = arr.view();
     REQUIRE(cv.size() == 16);
@@ -61,7 +61,7 @@ TEST_CASE("DeviceArray const view has correct size", "[array][device_array]") {
 
 TEST_CASE("DeviceArray subview has correct strides", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::make_device_array<float, 2>(sycl::range<2>{4, 5}, ctx, 0);
+    auto arr = naga::slabkit::make_device_array<float, 2>(sycl::range<2>{4, 5}, ctx, 0);
     
     auto sv = arr.subview({1, 1}, sycl::range<2>{2, 3});
     REQUIRE(sv.get_range() == sycl::range<2>{2, 3});
@@ -71,10 +71,10 @@ TEST_CASE("DeviceArray subview has correct strides", "[array][device_array]") {
 
 TEST_CASE("DeviceArray implicit conversion to DeviceView", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{8}, ctx, 0);
+    auto arr = naga::slabkit::make_device_array<int, 1>(sycl::range<1>{8}, ctx, 0);
     
     // This should work via implicit conversion operator
-    slabkit::DeviceView<int, 1> view = arr;
+    naga::slabkit::DeviceView<int, 1> view = arr;
     REQUIRE(view.data() == arr.data());
     REQUIRE(view.get_range() == arr.get_range());
 }
@@ -85,7 +85,7 @@ TEST_CASE("DeviceArray implicit conversion to DeviceView", "[array][device_array
 
 TEST_CASE("MirroredArray move-only semantics", "[array][mirrored_array]") {
     auto ctx = make_test_context();
-    auto ma = slabkit::MirroredArray<float, 1>{sycl::range<1>{4}, ctx, 0};
+    auto ma = naga::slabkit::MirroredArray<float, 1>{sycl::range<1>{4}, ctx, 0};
     
     // Move constructor
     auto ma2 = std::move(ma);
@@ -95,7 +95,7 @@ TEST_CASE("MirroredArray move-only semantics", "[array][mirrored_array]") {
 
 TEST_CASE("MirroredArray sync_to_device and sync_to_host round-trip", "[array][mirrored_array]") {
     auto ctx = make_test_context();
-    auto ma = slabkit::MirroredArray<float, 1>{sycl::range<1>{4}, ctx, 0};
+    auto ma = naga::slabkit::MirroredArray<float, 1>{sycl::range<1>{4}, ctx, 0};
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     // Write to host, sync to device, read back
@@ -116,7 +116,7 @@ TEST_CASE("MirroredArray sync_to_device and sync_to_host round-trip", "[array][m
 
 TEST_CASE("MirroredArray clone creates independent copy", "[array][mirrored_array]") {
     auto ctx = make_test_context();
-    auto ma = slabkit::MirroredArray<int, 1>{sycl::range<1>{4}, ctx, 0};
+    auto ma = naga::slabkit::MirroredArray<int, 1>{sycl::range<1>{4}, ctx, 0};
     
     // Initialize host data
     auto h = ma.host_data();
@@ -143,7 +143,7 @@ TEST_CASE("malloc_device registry-free allocates and frees", "[array][malloc_dev
     auto ctx = make_test_context();
     
     {
-        auto ptr = slabkit::malloc_device<float>(16, ctx, 0);
+        auto ptr = naga::slabkit::malloc_device<float>(16, ctx, 0);
         REQUIRE(ptr.get() != nullptr);
     }  // ptr goes out of scope, deleter called
     
@@ -156,11 +156,11 @@ TEST_CASE("malloc_device registry-free allocates and frees", "[array][malloc_dev
 // =============================================================================
 
 TEST_CASE("DeviceViewLike concept satisfied by DeviceView", "[array][concept]") {
-    static_assert(slabkit::DeviceViewLike<slabkit::DeviceView<float, 2>, float, 2>);
+    static_assert(naga::slabkit::DeviceViewLike<naga::slabkit::DeviceView<float, 2>, float, 2>);
     REQUIRE(true);
 }
 
 TEST_CASE("DeviceViewLike concept satisfied by DeviceSubView", "[array][concept]") {
-    static_assert(slabkit::DeviceViewLike<slabkit::DeviceSubView<float, 2>, float, 2>);
+    static_assert(naga::slabkit::DeviceViewLike<naga::slabkit::DeviceSubView<float, 2>, float, 2>);
     REQUIRE(true);
 }

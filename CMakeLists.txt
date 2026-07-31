@@ -11,13 +11,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Header-only interface target
-add_library(slabkit INTERFACE)
-add_library(slabkit::slabkit ALIAS slabkit)
-target_include_directories(slabkit INTERFACE
+add_library(naga-slabkit INTERFACE)
+add_library(naga::slabkit ALIAS naga-slabkit)
+target_include_directories(naga-slabkit INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_compile_features(slabkit INTERFACE cxx_std_20)
+target_compile_features(naga-slabkit INTERFACE cxx_std_20)
+set_target_properties(naga-slabkit PROPERTIES EXPORT_NAME slabkit)
 
 option(SLABKIT_BUILD_TESTS "Build Catch2 test suite" OFF)
 
@@ -38,11 +39,11 @@ include(CMakePackageConfigHelpers)
 
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-install(TARGETS slabkit EXPORT slabkitTargets)
+install(TARGETS naga-slabkit EXPORT slabkitTargets)
 
 install(EXPORT slabkitTargets
     FILE slabkitTargets.cmake
-    NAMESPACE slabkit::
+    NAMESPACE naga::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/slabkit
 )
 

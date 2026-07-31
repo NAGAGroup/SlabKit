@@ -112,7 +112,7 @@ Configures and constructs a `Context` using the builder pattern. Each configurat
 #include "slabkit/slabkit.hpp"
 
 auto dev = sycl::device{sycl::gpu_selector_v};
-auto ctx = slabkit::ContextBuilder()
+auto ctx = naga::slabkit::ContextBuilder()
     .devices({dev})
     .node_size(1024)
     .slab_size_per_device(256 * 1024 * 1024)
@@ -311,7 +311,7 @@ Owning smart pointer for USM device memory. Behaves like a standard `std::unique
 
 **Example**
 ```cpp
-auto ptr = slabkit::malloc_device<float>(1024, ctx, 0);  // unique_device_ptr<float>
+auto ptr = naga::slabkit::malloc_device<float>(1024, ctx, 0);  // unique_device_ptr<float>
 // Use ptr[i] to access elements
 ptr[512] = 3.14f;
 // On destruction, returns 1024 nodes to device 0's pool
@@ -361,7 +361,7 @@ Low-level allocation of `count` elements of type `T` from the pool. Returns an o
 **Example**
 ```cpp
 // Allocate 1000 ints from device 0
-auto ptr = slabkit::malloc_device<int>(1000, ctx, 0);
+auto ptr = naga::slabkit::malloc_device<int>(1000, ctx, 0);
 
 // Use in a kernel
 sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
@@ -412,7 +412,7 @@ Use this concept in generic functions to accept either view type:
 
 ```cpp
 template <typename V, typename T, int N>
-requires slabkit::DeviceViewLike<V, T, N>
+requires naga::slabkit::DeviceViewLike<V, T, N>
 void kernel_launcher(V view, sycl::queue& q) {
     q.parallel_for(view.get_range(), [=](sycl::id<N> id) {
         view[id] = 42;
@@ -640,13 +640,13 @@ q.parallel_for(view.get_range(), [=](sycl::id<N> id) {
 **Implicit Conversion**  
 `operator DeviceView<T, N>()` allows passing an array where a view is expected:
 ```cpp
-void fill_kernel(slabkit::DeviceView<float, 2> view, sycl::queue& q) {
+void fill_kernel(naga::slabkit::DeviceView<float, 2> view, sycl::queue& q) {
     q.parallel_for(view.get_range(), [=](sycl::id<2> id) {
         view[id] = 42.0f;
     }).wait();
 }
 
-auto arr = slabkit::make_device_array<float, 2>(range, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 2>(range, ctx, 0);
 fill_kernel(arr, q);  // arr implicitly converts to DeviceView<float, 2>
 ```
 
@@ -664,7 +664,7 @@ Creates a contiguous subview.
 
 **Example**
 ```cpp
-auto arr = slabkit::make_device_array<float, 2>(
+auto arr = naga::slabkit::make_device_array<float, 2>(
     sycl::range<2>{1024, 1024},
     ctx,
     0
@@ -727,12 +727,12 @@ The allocated memory is **uninitialized** (contains garbage). If you need zeroed
 
 ```cpp
 std::vector<float> zeros(arr.size(), 0.0f);
-slabkit::copy_to_device(zeros.data(), arr, q);
+naga::slabkit::copy_to_device(zeros.data(), arr, q);
 ```
 
 **Example**
 ```cpp
-auto arr = slabkit::make_device_array<int, 2>(
+auto arr = naga::slabkit::make_device_array<int, 2>(
     sycl::range<2>{256, 256},
     ctx,
     dev
@@ -823,7 +823,7 @@ Both return a `sycl::event` you can wait on or add as a dependency to future wor
 ```cpp
 // Use an in-order queue so sync and kernel execute sequentially
 sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
-auto arr = slabkit::MirroredArray<float, 2>(sycl::range<2>{512, 512}, ctx, 0);
+auto arr = naga::slabkit::MirroredArray<float, 2>(sycl::range<2>{512, 512}, ctx, 0);
 
 // Modify host side
 std::fill(arr.host_data().begin(), arr.host_data().end(), 1.0f);
@@ -918,14 +918,14 @@ sycl::event copy(const DeviceArray<T, N>& src, DeviceArray<T, N>& dst, sycl::que
 **Example**
 ```cpp
 std::vector<float> host_buf(1024);
-auto dev_arr = slabkit::make_device_array<float, 1>(
+auto dev_arr = naga::slabkit::make_device_array<float, 1>(
     sycl::range<1>{1024},
     ctx,
     0
 );
 
 // Copy from device to host (async)
-auto ev = slabkit::copy_to_host(dev_arr, host_buf.data(), q);
+auto ev = naga::slabkit::copy_to_host(dev_arr, host_buf.data(), q);
 ev.wait();
 
 // Use host_buf
@@ -967,10 +967,10 @@ sycl::event copy_to_device(const T* src, DeviceSubView<T, N> dst, sycl::queue& q
 ```cpp
 // Gather every other element
 auto sub = arr.subview({0}, {512});  // Actually contiguous; for strided use
-auto scratch = slabkit::make_scratch(ctx, 0, 4096);
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 4096);
 
 std::vector<float> out(512);
-auto ev = slabkit::copy_to_host(sub, out.data(), q, scratch);
+auto ev = naga::slabkit::copy_to_host(sub, out.data(), q, scratch);
 ev.wait();
 // scratch can be reused or destroyed
 ```
@@ -1031,7 +1031,7 @@ void sync_to_host(DeviceSubView<const T, N> src, T* dst, sycl::queue& q, DeviceS
 **Example**
 ```cpp
 std::vector<float> host_buf(arr.size());
-slabkit::sync_to_host(arr, host_buf.data(), q);  // Blocks until done
+naga::slabkit::sync_to_host(arr, host_buf.data(), q);  // Blocks until done
 // host_buf is now valid
 ```
 
@@ -1121,7 +1121,7 @@ Allocates a slab of size `scratch_size` from the pool. On destruction, returns t
 `unwind()` and `reset()` adjust only the host-side bump pointer; they do **not** touch device memory. Use them to reclaim space for a new allocation. The old allocation is not freed—it's simply overwritten by future bumps.
 
 ```cpp
-auto scratch = slabkit::make_scratch(ctx, 0, 4096);
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 4096);
 auto m1 = scratch.top();  // Mark: 0
 auto p1 = scratch.allocate(1000);  // Bump to 1000
 auto m2 = scratch.top();  // Mark: 1000
@@ -1136,7 +1136,7 @@ Not thread-safe. Use one `DeviceScratchMemory` per thread, or synchronize extern
 Move-only. Useful for returning scratch from functions:
 ```cpp
 DeviceScratchMemory create_scratch() {
-    return slabkit::make_scratch(ctx, 0, 8192);
+    return naga::slabkit::make_scratch(ctx, 0, 8192);
 }
 ```
 
@@ -1169,7 +1169,7 @@ A trivially-copyable struct holding a pointer and size to a scratch allocation. 
 **Static Factory**  
 ```cpp
 auto alloc_ptr = scratch.allocate(256);
-auto view = slabkit::DeviceScratchView::from_allocation(alloc_ptr, 256);
+auto view = naga::slabkit::DeviceScratchView::from_allocation(alloc_ptr, 256);
 ```
 
 **Usage in Kernels**  
@@ -1221,12 +1221,12 @@ Allocates `size` bytes from the device's pool and wraps it in a `DeviceScratchMe
 
 **Example**
 ```cpp
-auto ctx = slabkit::ContextBuilder()
+auto ctx = naga::slabkit::ContextBuilder()
     .devices({dev})
     .build();
 
 // 4 KB scratch buffer
-auto scratch = slabkit::make_scratch(ctx, 0, 4096);
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 4096);
 
 auto mark = scratch.top();
 auto buf = scratch.allocate(2048);

@@ -18,7 +18,7 @@ add_sycl_executable(slabkit_tests
 
 
 target_link_libraries(slabkit_tests PRIVATE
-    slabkit
+    naga::slabkit
     Catch2::Catch2WithMain
 )
 

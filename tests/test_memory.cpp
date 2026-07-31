@@ -2,9 +2,9 @@
 
 #include <sycl/sycl.hpp>
 
-#include "slabkit/context.hpp"
-#include "slabkit/memory.hpp"
-#include "slabkit/scratch.hpp"
+#include "naga/slabkit/context.hpp"
+#include "naga/slabkit/memory.hpp"
+#include "naga/slabkit/scratch.hpp"
 
 // =============================================================================
 // DeviceScratchMemory
@@ -12,20 +12,20 @@
 
 TEST_CASE("make_scratch construction with context", "[memory][scratch]") {
     sycl::device dev{sycl::cpu_selector_v};
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
                    .devices({dev})
                    .slab_size_per_device(1024 * 1024)
                    .build();
-    REQUIRE_NOTHROW(slabkit::make_scratch(ctx, 0));
+    REQUIRE_NOTHROW(naga::slabkit::make_scratch(ctx, 0));
 }
 
 TEST_CASE("DeviceScratchMemory allocate and unwind", "[memory][scratch]") {
     sycl::device dev{sycl::cpu_selector_v};
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
                    .devices({dev})
                    .slab_size_per_device(1024 * 1024)
                    .build();
-    auto scratch = slabkit::make_scratch(ctx, 0);
+    auto scratch = naga::slabkit::make_scratch(ctx, 0);
 
     SECTION("allocate_node returns non-null pointer") {
         void* ptr = scratch.allocate(256, alignof(std::max_align_t));

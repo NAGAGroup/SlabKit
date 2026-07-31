@@ -3,16 +3,16 @@
 #include <array>
 #include <numeric>
 
-#include "slabkit/array.hpp"
-#include "slabkit/context.hpp"
+#include "naga/slabkit/array.hpp"
+#include "naga/slabkit/context.hpp"
 
 // Verify DeviceView satisfies the DeviceViewLike concept
-static_assert(slabkit::DeviceViewLike<slabkit::DeviceView<float, 2>, float, 2>);
+static_assert(naga::slabkit::DeviceViewLike<naga::slabkit::DeviceView<float, 2>, float, 2>);
 
 // Helper: create a Context for testing
-inline std::shared_ptr<slabkit::Context> make_test_context() {
+inline std::shared_ptr<naga::slabkit::Context> make_test_context() {
     sycl::device dev{sycl::cpu_selector_v};
-    return slabkit::ContextBuilder()
+    return naga::slabkit::ContextBuilder()
             .devices({dev})
             .node_size(1024)
             .slab_size_per_device(4 * 1024 * 1024)
@@ -25,7 +25,7 @@ inline std::shared_ptr<slabkit::Context> make_test_context() {
 
 TEST_CASE("DeviceView satisfies DeviceViewLike concept", "[array][view]") {
     std::vector<float> storage(6);
-    slabkit::DeviceView<float, 2> v{storage.data(), sycl::range<2>{2, 3}};
+    naga::slabkit::DeviceView<float, 2> v{storage.data(), sycl::range<2>{2, 3}};
 
     SECTION("data() returns correct pointer") {
         REQUIRE(v.data() == storage.data());
@@ -40,11 +40,11 @@ TEST_CASE("DeviceView satisfies DeviceViewLike concept", "[array][view]") {
 
 TEST_CASE("DeviceView element access", "[array][view]") {
     std::vector<int> storage(6, 0);
-    slabkit::DeviceView<int, 2> v{storage.data(), sycl::range<2>{2, 3}};
+    naga::slabkit::DeviceView<int, 2> v{storage.data(), sycl::range<2>{2, 3}};
 
     SECTION("operator() with variadic indices (1D)") {
         std::vector<int> s1d(4, 0);
-        slabkit::DeviceView<int, 1> v1{s1d.data(), sycl::range<1>{4}};
+        naga::slabkit::DeviceView<int, 1> v1{s1d.data(), sycl::range<1>{4}};
         v1(0) = 10; v1(1) = 20; v1(2) = 30; v1(3) = 40;
         REQUIRE(s1d[0] == 10);
         REQUIRE(s1d[2] == 30);
@@ -75,7 +75,7 @@ TEST_CASE("DeviceSubView element access uses explicit strides", "[array][subview
 
     // SubView over a 2x2 window at (1,1) in a 4x4 array
     // strides = {4, 1}, ptr = storage.data() + 1*4 + 1*1 = storage.data() + 5
-    slabkit::DeviceSubView<int, 2> sv{
+    naga::slabkit::DeviceSubView<int, 2> sv{
         storage.data() + 5,
         sycl::range<2>{2, 2},
         sycl::range<2>{4, 1}   // element strides
@@ -83,7 +83,7 @@ TEST_CASE("DeviceSubView element access uses explicit strides", "[array][subview
 
     SECTION("operator() computes correct strided offset (1D)") {
         std::vector<int> s{10, 20, 30, 40};
-        slabkit::DeviceSubView<int, 1> sv1{s.data() + 1, sycl::range<1>{3}, sycl::range<1>{1}};
+        naga::slabkit::DeviceSubView<int, 1> sv1{s.data() + 1, sycl::range<1>{3}, sycl::range<1>{1}};
         REQUIRE(sv1(0) == 20);
         REQUIRE(sv1(1) == 30);
         REQUIRE(sv1(2) == 40);
@@ -106,7 +106,7 @@ TEST_CASE("DeviceSubView element access uses explicit strides", "[array][subview
 
 TEST_CASE("DeviceArray from_pool is move-only", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::DeviceArray<float, 1>::from_pool(sycl::range<1>{8}, ctx, 0);
+    auto arr = naga::slabkit::DeviceArray<float, 1>::from_pool(sycl::range<1>{8}, ctx, 0);
     
     // Move constructor works
     auto arr2 = std::move(arr);
@@ -115,7 +115,7 @@ TEST_CASE("DeviceArray from_pool is move-only", "[array][device_array]") {
 
 TEST_CASE("DeviceArray has move-only semantics", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::DeviceArray<float, 1>::from_pool(sycl::range<1>{8}, ctx, 0);
+    auto arr = naga::slabkit::DeviceArray<float, 1>::from_pool(sycl::range<1>{8}, ctx, 0);
 
     SECTION("copy construction is deleted") {
         // This should not compile: auto arr2 = arr;
@@ -131,7 +131,7 @@ TEST_CASE("DeviceArray has move-only semantics", "[array][device_array]") {
 
 TEST_CASE("DeviceArray view and subview", "[array][device_array]") {
     auto ctx = make_test_context();
-    auto arr = slabkit::DeviceArray<int, 2>::from_pool(sycl::range<2>{4, 4}, ctx, 0);
+    auto arr = naga::slabkit::DeviceArray<int, 2>::from_pool(sycl::range<2>{4, 4}, ctx, 0);
 
     SECTION("view() returns DeviceView over full range") {
         auto v = arr.view();
@@ -160,7 +160,7 @@ TEST_CASE("make_device_array factory registry-free", "[array][make_device_array]
     auto ctx = make_test_context();
 
     SECTION("allocates from Context pool for given device_index") {
-        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{16}, ctx, 0);
+        auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{16}, ctx, 0);
         REQUIRE(arr.data() != nullptr);
         REQUIRE(arr.size() == 16);
         REQUIRE(arr.get_range() == sycl::range<1>{16});
@@ -174,7 +174,7 @@ TEST_CASE("make_device_array factory registry-free", "[array][make_device_array]
 
 TEST_CASE("MirroredArray move-only semantics", "[array][mirrored]") {
     auto ctx = make_test_context();
-    auto ma = slabkit::MirroredArray<float, 1>{sycl::range<1>{4}, ctx, 0};
+    auto ma = naga::slabkit::MirroredArray<float, 1>{sycl::range<1>{4}, ctx, 0};
 
     // Move constructor works
     auto ma2 = std::move(ma);
@@ -185,7 +185,7 @@ TEST_CASE("MirroredArray sync", "[array][mirrored]") {
     auto ctx = make_test_context();
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
-    slabkit::MirroredArray<float, 1> ma(sycl::range<1>{4}, ctx, 0);
+    naga::slabkit::MirroredArray<float, 1> ma(sycl::range<1>{4}, ctx, 0);
 
     SECTION("sync_to_device copies host span to device") {
         // Write to host side
@@ -195,7 +195,7 @@ TEST_CASE("MirroredArray sync", "[array][mirrored]") {
         ma.sync_to_device(q).wait();
         // Copy back and verify
         std::vector<float> result(4, 0.0f);
-        slabkit::sync_to_host(ma.const_view(), result.data(), q);
+        naga::slabkit::sync_to_host(ma.const_view(), result.data(), q);
         REQUIRE(result[0] == 1.0f);
         REQUIRE(result[3] == 4.0f);
     }
@@ -222,21 +222,21 @@ TEST_CASE("copy_to_host returns sycl::event", "[array][transfer]") {
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("DeviceArray overload") {
-        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
+        auto arr = naga::slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
         // Upload known data
         std::vector<int> src = {10, 20, 30, 40};
-        slabkit::copy_to_device(src.data(), arr.view(), q).wait();
+        naga::slabkit::copy_to_device(src.data(), arr.view(), q).wait();
         // Download and verify
         std::vector<int> dst(4, 0);
-        slabkit::copy_to_host(arr, dst.data(), q).wait();
+        naga::slabkit::copy_to_host(arr, dst.data(), q).wait();
         REQUIRE(dst == src);
     }
     SECTION("DeviceView overload") {
-        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
+        auto arr = naga::slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
         std::vector<int> src = {5, 6, 7, 8};
-        slabkit::copy_to_device(src.data(), arr.view(), q).wait();
+        naga::slabkit::copy_to_device(src.data(), arr.view(), q).wait();
         std::vector<int> dst(4, 0);
-        slabkit::copy_to_host(arr.view(), dst.data(), q).wait();
+        naga::slabkit::copy_to_host(arr.view(), dst.data(), q).wait();
         REQUIRE(dst == src);
     }
     q.wait();
@@ -247,21 +247,21 @@ TEST_CASE("copy_to_device returns sycl::event", "[array][transfer]") {
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("DeviceArray overload") {
-        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{3}, ctx, 0);
+        auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{3}, ctx, 0);
         std::vector<float> src = {1.5f, 2.5f, 3.5f};
-        auto ev = slabkit::copy_to_device(src.data(), arr.view(), q);
+        auto ev = naga::slabkit::copy_to_device(src.data(), arr.view(), q);
         REQUIRE_NOTHROW(ev.wait());
         std::vector<float> dst(3, 0.0f);
-        slabkit::sync_to_host(arr, dst.data(), q);
+        naga::slabkit::sync_to_host(arr, dst.data(), q);
         REQUIRE(dst == src);
     }
     SECTION("DeviceView overload") {
-        auto arr = slabkit::make_device_array<float, 1>(sycl::range<1>{3}, ctx, 0);
+        auto arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{3}, ctx, 0);
         std::vector<float> src = {7.0f, 8.0f, 9.0f};
-        auto ev = slabkit::copy_to_device(src.data(), arr.view(), q);
+        auto ev = naga::slabkit::copy_to_device(src.data(), arr.view(), q);
         REQUIRE_NOTHROW(ev.wait());
         std::vector<float> dst(3, 0.0f);
-        slabkit::sync_to_host(arr, dst.data(), q);
+        naga::slabkit::sync_to_host(arr, dst.data(), q);
         REQUIRE(dst == src);
     }
     q.wait();
@@ -276,14 +276,14 @@ TEST_CASE("parallel_for with DeviceView capture — element-wise kernel", "[arra
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("element-wise multiply: result[id] = a[id] * b[id]") {
-        auto a_arr      = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
-        auto b_arr      = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
-        auto result_arr = slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
+        auto a_arr      = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
+        auto b_arr      = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
+        auto result_arr = naga::slabkit::make_device_array<float, 1>(sycl::range<1>{8}, ctx, 0);
 
         std::vector<float> a_h = {1, 2, 3, 4, 5, 6, 7, 8};
         std::vector<float> b_h = {2, 2, 2, 2, 2, 2, 2, 2};
-        slabkit::copy_to_device(a_h.data(), a_arr.view(), q).wait();
-        slabkit::copy_to_device(b_h.data(), b_arr.view(), q).wait();
+        naga::slabkit::copy_to_device(a_h.data(), a_arr.view(), q).wait();
+        naga::slabkit::copy_to_device(b_h.data(), b_arr.view(), q).wait();
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<1>{8},
@@ -293,12 +293,12 @@ TEST_CASE("parallel_for with DeviceView capture — element-wise kernel", "[arra
         }).wait();
 
         std::vector<float> out(8);
-        slabkit::sync_to_host(result_arr, out.data(), q);
+        naga::slabkit::sync_to_host(result_arr, out.data(), q);
         REQUIRE(out == std::vector<float>{2, 4, 6, 8, 10, 12, 14, 16});
     }
 
     SECTION("write sequential index: result[id[0]] = id[0]") {
-        auto arr = slabkit::make_device_array<int, 1>(sycl::range<1>{6}, ctx, 0);
+        auto arr = naga::slabkit::make_device_array<int, 1>(sycl::range<1>{6}, ctx, 0);
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<1>{6},
@@ -308,7 +308,7 @@ TEST_CASE("parallel_for with DeviceView capture — element-wise kernel", "[arra
         }).wait();
 
         std::vector<int> out(6);
-        slabkit::sync_to_host(arr, out.data(), q);
+        naga::slabkit::sync_to_host(arr, out.data(), q);
         REQUIRE(out == std::vector<int>{0, 1, 2, 3, 4, 5});
     }
     q.wait();
@@ -319,7 +319,7 @@ TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("write row*10+col into 2D result via view capture") {
-        auto arr = slabkit::make_device_array<int, 2>(sycl::range<2>{3, 4}, ctx, 0);
+        auto arr = naga::slabkit::make_device_array<int, 2>(sycl::range<2>{3, 4}, ctx, 0);
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<2>{3, 4},
@@ -329,7 +329,7 @@ TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
         }).wait();
 
         std::vector<int> out(12);
-        slabkit::sync_to_host(arr, out.data(), q);
+        naga::slabkit::sync_to_host(arr, out.data(), q);
         REQUIRE(out[0]  == 0);
         REQUIRE(out[1]  == 1);
         REQUIRE(out[4]  == 10);
@@ -337,14 +337,14 @@ TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
     }
 
     SECTION("element-wise add two 2D views") {
-        auto a_arr      = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
-        auto b_arr      = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
-        auto result_arr = slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
+        auto a_arr      = naga::slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
+        auto b_arr      = naga::slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
+        auto result_arr = naga::slabkit::make_device_array<int, 2>(sycl::range<2>{2, 3}, ctx, 0);
 
         std::vector<int> a_h = {1, 2, 3, 4, 5, 6};
         std::vector<int> b_h = {10, 20, 30, 40, 50, 60};
-        slabkit::copy_to_device(a_h.data(), a_arr.view(), q).wait();
-        slabkit::copy_to_device(b_h.data(), b_arr.view(), q).wait();
+        naga::slabkit::copy_to_device(a_h.data(), a_arr.view(), q).wait();
+        naga::slabkit::copy_to_device(b_h.data(), b_arr.view(), q).wait();
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<2>{2, 3},
@@ -354,7 +354,7 @@ TEST_CASE("parallel_for with 2D DeviceView capture", "[array][kernel][view]") {
         }).wait();
 
         std::vector<int> out(6);
-        slabkit::sync_to_host(result_arr, out.data(), q);
+        naga::slabkit::sync_to_host(result_arr, out.data(), q);
         REQUIRE(out == std::vector<int>{11, 22, 33, 44, 55, 66});
     }
     q.wait();
@@ -365,9 +365,9 @@ TEST_CASE("parallel_for writing into DeviceSubView capture — strided write", "
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("kernel writes into 2x2 subview of 4x4 array, surrounding elements untouched") {
-        auto arr = slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, ctx, 0);
+        auto arr = naga::slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, ctx, 0);
         std::vector<int> zeros(16, 0);
-        slabkit::copy_to_device(zeros.data(), arr.view(), q).wait();
+        naga::slabkit::copy_to_device(zeros.data(), arr.view(), q).wait();
 
         auto sv = arr.subview(std::array<size_t, 2>{1, 1}, sycl::range<2>{2, 2});
         // sv.strides_ == {4, 1}, sv.data() == arr.data() + 5
@@ -381,7 +381,7 @@ TEST_CASE("parallel_for writing into DeviceSubView capture — strided write", "
         }).wait();
 
         std::vector<int> out(16, -1);
-        slabkit::sync_to_host(arr, out.data(), q);
+        naga::slabkit::sync_to_host(arr, out.data(), q);
 
         // subview region written correctly
         REQUIRE(out[5]  == 1);
@@ -402,17 +402,17 @@ TEST_CASE("parallel_for reading from DeviceSubView, writing to DeviceView — ga
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
 
     SECTION("gather: read 2x2 strided subview into contiguous 1D result") {
-        auto src_arr = slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, ctx, 0);
+        auto src_arr = naga::slabkit::make_device_array<int, 2>(sycl::range<2>{4, 4}, ctx, 0);
         std::vector<int> src_h(16);
         std::iota(src_h.begin(), src_h.end(), 0);  // 0..15
-        slabkit::copy_to_device(src_h.data(), src_arr.view(), q).wait();
+        naga::slabkit::copy_to_device(src_h.data(), src_arr.view(), q).wait();
 
         // subview at (1,2), size 2x2
         // ptr = src.data() + 6, strides = {4,1}
         // sv(0,0)=6, sv(0,1)=7, sv(1,0)=10, sv(1,1)=11
         auto sv = src_arr.subview(std::array<size_t, 2>{1, 2}, sycl::range<2>{2, 2});
 
-        auto dst_arr = slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
+        auto dst_arr = naga::slabkit::make_device_array<int, 1>(sycl::range<1>{4}, ctx, 0);
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<2>{2, 2},
@@ -423,7 +423,7 @@ TEST_CASE("parallel_for reading from DeviceSubView, writing to DeviceView — ga
         }).wait();
 
         std::vector<int> out(4, -1);
-        slabkit::sync_to_host(dst_arr, out.data(), q);
+        naga::slabkit::sync_to_host(dst_arr, out.data(), q);
         REQUIRE(out == std::vector<int>{6, 7, 10, 11});
     }
     q.wait();

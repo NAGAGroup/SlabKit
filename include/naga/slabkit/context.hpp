@@ -20,10 +20,10 @@
 
 #include <sycl/sycl.hpp>
 
-#include "slabkit/error.hpp"
-#include "slabkit/detail/device_pool.hpp"
+#include "naga/slabkit/error.hpp"
+#include "naga/slabkit/detail/device_pool.hpp"
 
-namespace slabkit {
+namespace naga::slabkit {
 
 // =============================================================================
 // Context — SYCL platform contexts, devices, and memory pools
@@ -247,4 +247,4 @@ private:
     size_t                     slab_size_  = 0;  // 0 = use default (64MB)
 };
 
-}  // namespace slabkit
+}  // namespace naga::slabkit

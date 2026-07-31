@@ -56,7 +56,7 @@ This design enforces three fundamental principles:
 You never construct a `Context` directly. Instead, use `ContextBuilder`:
 
 ```cpp
-auto ctx = slabkit::ContextBuilder()
+auto ctx = naga::slabkit::ContextBuilder()
     .devices({dev1, dev2})
     .node_size(1024)
     .slab_size_per_device(64 * 1024 * 1024)
@@ -120,7 +120,7 @@ These return queues linked to the SYCL context that was created for the device's
 `DeviceArray<T, N>` is move-only. You cannot copy it:
 
 ```cpp
-auto arr1 = slabkit::make_device_array<float, 1>(range, ctx, 0);
+auto arr1 = naga::slabkit::make_device_array<float, 1>(range, ctx, 0);
 // auto arr2 = arr1;                    // Compilation error: copy deleted
 auto arr2 = std::move(arr1);            // OK: move allowed
 // arr1 is now empty; arr2 owns the memory
@@ -155,7 +155,7 @@ When the array's `unique_ptr` is destroyed, the deleter is invoked. It locks the
 `DeviceArray` does not allocate memory directly. Instead, use the factory function:
 
 ```cpp
-auto arr = slabkit::make_device_array<T, N>(range, ctx, device_index);
+auto arr = naga::slabkit::make_device_array<T, N>(range, ctx, device_index);
 ```
 
 This calls `DeviceArray::from_pool()`, which:
@@ -251,7 +251,7 @@ A sub-view can represent non-contiguous slices—for example, every other row of
 **Critical invariant:** Views hold raw pointers. They do not hold a reference to the backing `DeviceArray`. If the array is destroyed while a view is in use by a kernel, the result is undefined behavior:
 
 ```cpp
-auto arr = slabkit::make_device_array<float, 1>(range, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 1>(range, ctx, 0);
 auto view = arr.view();
 std::unique_ptr<DeviceArray<float, 1>> arr_ptr(std::make_unique<DeviceArray<float, 1>>(std::move(arr)));
 
@@ -268,7 +268,7 @@ arr_ptr.reset();  // destroy array, return memory to pool
 In practice, keep the array and all views in scope until all work completes:
 
 ```cpp
-auto arr = slabkit::make_device_array<float, 1>(range, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 1>(range, ctx, 0);
 auto view = arr.view();
 auto ev = q.parallel_for(range, [=](sycl::id<1> id) { view[id] = 1.f; });
 ev.wait();  // wait before arr goes out of scope
@@ -280,7 +280,7 @@ ev.wait();  // wait before arr goes out of scope
 
 ```cpp
 void kernel_wrapper(DeviceView<float, 1> view) { /* ... */ }
-auto arr = slabkit::make_device_array<float, 1>(range, ctx, 0);
+auto arr = naga::slabkit::make_device_array<float, 1>(range, ctx, 0);
 kernel_wrapper(arr);  // allowed! arr → DeviceView<float, 1>
 ```
 
@@ -291,7 +291,7 @@ This is safe because the conversion is just a projection; the array's lifetime i
 `MirroredArray<T, N>` owns both a host (`std::vector<T>`) and device (`DeviceArray<T, N>`) allocation for the same logical data:
 
 ```cpp
-auto mirrored = slabkit::MirroredArray<float, 2>(
+auto mirrored = naga::slabkit::MirroredArray<float, 2>(
     sycl::range<2>{1024, 1024},
     ctx,
     0  // device index
@@ -334,7 +334,7 @@ for (size_t i = 0; i < host_span.size(); ++i)
 Clone a `MirroredArray`:
 
 ```cpp
-auto original = slabkit::MirroredArray<float, 1>(range, ctx, 0);
+auto original = naga::slabkit::MirroredArray<float, 1>(range, ctx, 0);
 // ... populate original.host_data() ...
 
 auto copy = original.clone();  // deep copy of host vector, new device allocation
@@ -364,7 +364,7 @@ For device-only allocations, use `DeviceArray` directly—it's lighter and avoid
 ### Creating Scratch Memory
 
 ```cpp
-auto scratch = slabkit::make_scratch(ctx, device_index, 64 * 1024);  // 64 KB
+auto scratch = naga::slabkit::make_scratch(ctx, device_index, 64 * 1024);  // 64 KB
 ```
 
 This allocates a 64 KB slab from the Context's pool for the device. When the `DeviceScratchMemory` is destroyed, the slab is returned to the pool.
@@ -394,7 +394,7 @@ scratch.reset();
 Save-unwind is the canonical pattern for hot-loop temporary memory:
 
 ```cpp
-auto scratch = slabkit::make_scratch(ctx, 0, 8192);
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 8192);
 
 for (int iter = 0; iter < 1000; ++iter) {
     auto mark = scratch.top();
@@ -414,7 +414,7 @@ for (int iter = 0; iter < 1000; ++iter) {
 Inside nested function calls, reuse the same `DeviceScratchMemory`:
 
 ```cpp
-void kernel_step(slabkit::DeviceScratchMemory& scratch, sycl::queue& q) {
+void kernel_step(naga::slabkit::DeviceScratchMemory& scratch, sycl::queue& q) {
     // Bump-allocate a temporary
     float* temp = static_cast<float*>(
         scratch.allocate(256 * sizeof(float), alignof(float))
@@ -429,7 +429,7 @@ void kernel_step(slabkit::DeviceScratchMemory& scratch, sycl::queue& q) {
 }
 
 // Usage
-auto scratch = slabkit::make_scratch(ctx, 0, 4096);
+auto scratch = naga::slabkit::make_scratch(ctx, 0, 4096);
 auto m1 = scratch.top();
 kernel_step(scratch, q);
 scratch.unwind(m1);  // reclaims all allocations inside kernel_step

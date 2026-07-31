@@ -855,10 +855,10 @@ using DeviceScratchBuffer = DeviceScratchMemory;  // DEPRECATED
 
 ```cpp
 // Before (deprecated)
-slabkit::DeviceScratchBuffer scratch = slabkit::make_scratch(ctx, 0);
+naga::slabkit::DeviceScratchBuffer scratch = naga::slabkit::make_scratch(ctx, 0);
 
 // After
-slabkit::DeviceScratchMemory scratch = slabkit::make_scratch(ctx, 0);
+naga::slabkit::DeviceScratchMemory scratch = naga::slabkit::make_scratch(ctx, 0);
 ```
 
 **Why:** The `Buffer` suffix implies a simple contiguous memory region. `DeviceScratchMemory` is a bump-stack allocator with `allocate()`, `top()`, `unwind()`, and `reset()` — the `Memory` suffix better captures this semantics.

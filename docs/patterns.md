@@ -14,20 +14,20 @@ Create a `Context` once at startup and pass its `shared_ptr` throughout your pro
 #include <vector>
 #include <thread>
 
-std::shared_ptr<slabkit::Context> build_context() {
+std::shared_ptr<naga::slabkit::Context> build_context() {
     auto dev = sycl::device{sycl::gpu_selector_v};
-    return slabkit::ContextBuilder()
+    return naga::slabkit::ContextBuilder()
         .devices({dev})
         .node_size(1024)
         .slab_size_per_device(256 * 1024 * 1024)
         .build();
 }
 
-void worker_thread(std::shared_ptr<slabkit::Context> ctx) {
+void worker_thread(std::shared_ptr<naga::slabkit::Context> ctx) {
     // Each thread receives a shared_ptr to the same Context
     auto dev = ctx->devices[0];
     sycl::queue q = ctx->make_in_order_queue(dev);
-    auto arr = slabkit::make_device_array<float, 1>(
+    auto arr = naga::slabkit::make_device_array<float, 1>(
         sycl::range<1>{1024}, ctx, 0);
     // Use arr in kernels...
 }
@@ -62,14 +62,14 @@ int main() {
 #include <sycl/sycl.hpp>
 
 int main() {
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({sycl::device{sycl::cpu_selector_v}})
         .build();
     
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
     
     // Allocate a 2D array
-    auto arr = slabkit::make_device_array<float, 2>(
+    auto arr = naga::slabkit::make_device_array<float, 2>(
         sycl::range<2>{512, 512}, ctx, 0);
     
     // Extract a view BEFORE the lambda
@@ -97,21 +97,21 @@ When writing a function that runs a kernel, take a `DeviceView<T, N>` parameterâ
 #include <sycl/sycl.hpp>
 
 // Generic kernel function: accepts a view, not the array
-void scale_array(slabkit::DeviceView<float, 1> view, float factor, sycl::queue& q) {
+void scale_array(naga::slabkit::DeviceView<float, 1> view, float factor, sycl::queue& q) {
     q.parallel_for(view.get_range(), [=](sycl::id<1> id) {
         view[id] *= factor;
     }).wait();
 }
 
 int main() {
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({sycl::device{sycl::cpu_selector_v}})
         .build();
     
     auto dev = ctx->devices[0];
     sycl::queue q = ctx->make_in_order_queue(dev);
     
-    auto arr = slabkit::make_device_array<float, 1>(
+    auto arr = naga::slabkit::make_device_array<float, 1>(
         sycl::range<1>{1000}, ctx, 0);
     
     // Call with explicit view
@@ -138,7 +138,7 @@ When writing generic algorithms that work on both `DeviceView` and `DeviceSubVie
 #include <concepts>
 
 // Generic algorithm that works on any view-like type
-template <slabkit::DeviceViewLike<float, 2> V>
+template <naga::slabkit::DeviceViewLike<float, 2> V>
 void apply_2d(V view, float value, sycl::queue& q) {
     q.parallel_for(view.get_range(), [=](sycl::id<2> id) {
         view[id] = value;
@@ -146,14 +146,14 @@ void apply_2d(V view, float value, sycl::queue& q) {
 }
 
 int main() {
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({sycl::device{sycl::cpu_selector_v}})
         .build();
     
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
     
     // Allocate and fill a full array
-    auto arr = slabkit::make_device_array<float, 2>(
+    auto arr = naga::slabkit::make_device_array<float, 2>(
         sycl::range<2>{1024, 1024}, ctx, 0);
     apply_2d(arr.view(), 1.0f, q);
     
@@ -179,16 +179,16 @@ Allocate scratch memory once outside a loop, and use save/unwind per iteration t
 #include <vector>
 
 int main() {
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({sycl::device{sycl::cpu_selector_v}})
         .build();
     
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
     
     // Allocate scratch once outside the loop
-    auto scratch = slabkit::make_scratch(ctx, 0, 64 * 1024);  // 64 KB
+    auto scratch = naga::slabkit::make_scratch(ctx, 0, 64 * 1024);  // 64 KB
     
-    std::vector<slabkit::DeviceArray<float, 1>> results;
+    std::vector<naga::slabkit::DeviceArray<float, 1>> results;
     
     for (int i = 0; i < 10; ++i) {
         // Save the current bump position
@@ -204,7 +204,7 @@ int main() {
         }).wait();
         
         // Allocate the iteration result
-        auto result = slabkit::make_device_array<float, 1>(
+        auto result = naga::slabkit::make_device_array<float, 1>(
             sycl::range<1>{512}, ctx, 0);
         auto result_view = result.view();
         
@@ -238,14 +238,14 @@ When you have data computed on the host that needs to be transferred to the devi
 #include <iostream>
 
 int main() {
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({sycl::device{sycl::cpu_selector_v}})
         .build();
     
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
     
     // Allocate paired host and device arrays
-    slabkit::MirroredArray<float, 1> arr(
+    naga::slabkit::MirroredArray<float, 1> arr(
         sycl::range<1>{1024}, ctx, 0);
     
     // Initialize on host
@@ -287,7 +287,7 @@ When overlapping compute and transfer, use an in-order queue to guarantee sequen
 #include <vector>
 
 int main() {
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({sycl::device{sycl::cpu_selector_v}})
         .build();
     
@@ -304,14 +304,14 @@ int main() {
     }
     
     // Device-side arrays
-    auto input = slabkit::make_device_array<float, 1>(
+    auto input = naga::slabkit::make_device_array<float, 1>(
         sycl::range<1>{1024}, ctx, 0);
-    auto output = slabkit::make_device_array<float, 1>(
+    auto output = naga::slabkit::make_device_array<float, 1>(
         sycl::range<1>{1024}, ctx, 0);
     
     // Chain operations in submission order
     // 1. Upload input
-    auto ev_upload = slabkit::copy_to_device(
+    auto ev_upload = naga::slabkit::copy_to_device(
         host_input.data(), input, q);
     
     // 2. Kernel (implicitly depends on upload because queue is in-order)
@@ -322,7 +322,7 @@ int main() {
     });
     
     // 3. Download result (implicitly depends on kernel)
-    auto ev_download = slabkit::copy_to_host(
+    auto ev_download = naga::slabkit::copy_to_host(
         output, host_output.data(), q);
     
     // Wait for all work to complete
@@ -347,14 +347,14 @@ Copy a rectangular sub-region of a large multidimensional array using subviews a
 #include <iostream>
 
 int main() {
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({sycl::device{sycl::cpu_selector_v}})
         .build();
     
     sycl::queue q = ctx->make_in_order_queue(ctx->devices[0]);
     
     // Allocate a large 2D array
-    auto arr = slabkit::make_device_array<float, 2>(
+    auto arr = naga::slabkit::make_device_array<float, 2>(
         sycl::range<2>{1024, 1024}, ctx, 0);
     
     // Initialize: fill with indices
@@ -367,11 +367,11 @@ int main() {
     auto sub = arr.subview({0, 0}, {512, 512});
     
     // Allocate scratch for the Tier 2 transfer
-    auto scratch = slabkit::make_scratch(ctx, 0, 512 * 512 * sizeof(float));
+    auto scratch = naga::slabkit::make_scratch(ctx, 0, 512 * 512 * sizeof(float));
     
     // Copy subview to host using scratch as staging buffer
     std::vector<float> host_buf(512 * 512);
-    auto ev = slabkit::copy_to_host(sub, host_buf.data(), q, scratch);
+    auto ev = naga::slabkit::copy_to_host(sub, host_buf.data(), q, scratch);
     ev.wait();
     
     // Verify
@@ -397,36 +397,36 @@ Wrap allocations in try/catch and use the `reason()` method to diagnose and resp
 #include <vector>
 
 int main() {
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({sycl::device{sycl::cpu_selector_v}})
         .slab_size_per_device(64 * 1024 * 1024)  // 64 MB limit
         .build();
     
     // Try to allocate progressively larger arrays until we hit the limit
-    std::vector<slabkit::DeviceArray<float, 1>> arrays;
+    std::vector<naga::slabkit::DeviceArray<float, 1>> arrays;
     
     for (int iteration = 0; iteration < 100; ++iteration) {
         try {
             size_t size = 8 * 1024 * 1024 / sizeof(float);  // 8 MB per array
-            auto arr = slabkit::make_device_array<float, 1>(
+            auto arr = naga::slabkit::make_device_array<float, 1>(
                 sycl::range<1>{size}, ctx, 0);
             arrays.push_back(std::move(arr));
             std::cout << "Allocated array " << iteration << "\n";
-        } catch (const slabkit::AllocationError& e) {
+        } catch (const naga::slabkit::AllocationError& e) {
             std::cout << "Allocation failed at iteration " << iteration << "\n";
             
             switch (e.reason()) {
-                case slabkit::AllocationError::Reason::PoolExhausted:
+                case naga::slabkit::AllocationError::Reason::PoolExhausted:
                     std::cout << "  Reason: Pool slab is full\n";
                     std::cout << "  Action: Destroy some arrays or increase slab_size_per_device\n";
                     break;
                     
-                case slabkit::AllocationError::Reason::Fragmented:
+                case naga::slabkit::AllocationError::Reason::Fragmented:
                     std::cout << "  Reason: Fragmentation (no contiguous block available)\n";
                     std::cout << "  Action: Reduce allocation size or recycle allocations\n";
                     break;
                     
-                case slabkit::AllocationError::Reason::ScratchFull:
+                case naga::slabkit::AllocationError::Reason::ScratchFull:
                     std::cout << "  Reason: Scratch memory is exhausted\n";
                     std::cout << "  Action: Call reset() on scratch or increase size\n";
                     break;
@@ -457,17 +457,17 @@ int main() {
     auto dev = sycl::device{sycl::gpu_selector_v};
     
     // Build context with that device
-    auto ctx = slabkit::ContextBuilder()
+    auto ctx = naga::slabkit::ContextBuilder()
         .devices({dev})
         .node_size(2048)
         .slab_size_per_device(256 * 1024 * 1024)
         .build();
     
     // Use the device overload directly (no index lookup)
-    auto scratch = slabkit::make_scratch(ctx, dev, 128 * 1024);
+    auto scratch = naga::slabkit::make_scratch(ctx, dev, 128 * 1024);
     
     // Also allocate arrays using the device overload
-    auto arr = slabkit::make_device_array<int, 1>(
+    auto arr = naga::slabkit::make_device_array<int, 1>(
         sycl::range<1>{10000}, ctx, dev);
     
     sycl::queue q = ctx->make_in_order_queue(dev);

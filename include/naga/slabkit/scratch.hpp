@@ -15,10 +15,10 @@
 
 #include <sycl/sycl.hpp>
 
-#include "slabkit/detail/device_stack.hpp"
-#include "slabkit/context.hpp"
+#include "naga/slabkit/detail/device_stack.hpp"
+#include "naga/slabkit/context.hpp"
 
-namespace slabkit {
+namespace naga::slabkit {
 
 // =============================================================================
 // DeviceScratchView — non-owning trivially copyable view
@@ -67,4 +67,4 @@ struct DeviceScratchView {
     return DeviceScratchMemory{&ctx->pool_for(dev), size};
 }
 
-}  // namespace slabkit
+}  // namespace naga::slabkit

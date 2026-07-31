@@ -10,11 +10,11 @@
 
 #include <sycl/sycl.hpp>
 
-#include "slabkit/memory.hpp"
-#include "slabkit/context.hpp"
-#include "slabkit/scratch.hpp"
+#include "naga/slabkit/memory.hpp"
+#include "naga/slabkit/context.hpp"
+#include "naga/slabkit/scratch.hpp"
 
-namespace slabkit {
+namespace naga::slabkit {
 
 // =============================================================================
 // Forward declarations
@@ -609,4 +609,4 @@ public:
     }
 };
 
-}  // namespace slabkit
+}  // namespace naga::slabkit
