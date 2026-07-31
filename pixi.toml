@@ -25,8 +25,29 @@ rocm-device-libs = ">=6,<7"
 [dependencies]
 slabkit = { path = "." }
 
+# Consumer envs per backend; `all` carries every runtime.
 [environments.default]
 features = []
+solve-group = "default"
+
+[environments.cuda]
+features = ["cuda"]
+solve-group = "default"
+
+[environments.l0]
+features = ["level-zero"]
+solve-group = "default"
+
+[environments.ocl]
+features = ["opencl"]
+solve-group = "default"
+
+[environments.amd]
+features = ["amd"]
+solve-group = "default"
+
+[environments.all]
+features = ["cuda", "level-zero", "opencl", "amd"]
 solve-group = "default"
 
 # ------------------------------------------------------------------------------
@@ -74,23 +95,29 @@ test = { cmd = "nu scripts/test.nu dev", depends-on = ["build"] }
 [environments.dev]
 features = ["cuda", "dev"]
 solve-group = "default"
+no-default-feature = true
 
 [environments.dev-cuda]
 features = ["cuda", "dev"]
 solve-group = "default"
+no-default-feature = true
 
 [environments.dev-l0]
 features = ["level-zero", "dev"]
 solve-group = "default"
+no-default-feature = true
 
 [environments.dev-ocl]
 features = ["opencl", "dev"]
 solve-group = "default"
+no-default-feature = true
 
 [environments.dev-amd]
 features = ["amd", "dev"]
 solve-group = "default"
+no-default-feature = true
 
 [environments.dev-omp]
 features = ["dev"]
 solve-group = "default"
+no-default-feature = true
