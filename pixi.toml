@@ -25,11 +25,8 @@ rocm-device-libs = ">=6,<7"
 [dependencies]
 slabkit = { path = "." }
 
-# Consumer envs per backend; `all` carries every runtime.
-[environments.default]
-features = []
-solve-group = "default"
-
+# Consumer envs per backend (implicit default env = bare package);
+# `all` carries every runtime.
 [environments.cuda]
 features = ["cuda"]
 solve-group = "default"
