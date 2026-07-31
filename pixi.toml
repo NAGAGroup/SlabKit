@@ -56,3 +56,14 @@ extra-args = ["-DSLABKIT_BUILD_TESTS=OFF"]
 # build, so the backend's ninja-based input tracking misses them. Without this
 # glob, edits to headers do NOT invalidate pixi's build cache.
 extra-input-globs = ["include/**/*.hpp"]
+
+# ------------------------------------------------------------------------------
+# Dev environment (fleet convention): the package's dependency closure
+# installs without building it; project tasks run via `pixi run -e dev ...`.
+# ------------------------------------------------------------------------------
+[feature.dev.dev]
+slabkit = { path = "." }
+
+[environments.dev]
+features = ["base", "opencl", "level-zero", "cuda", "amd", "dev"]
+solve-group = "default"
