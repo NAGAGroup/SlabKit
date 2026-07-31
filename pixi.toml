@@ -4,6 +4,7 @@ channels = ["https://prefix.dev/code-accelerate", "conda-forge"]
 name = "slabkit"
 platforms = ["linux-64"]
 version = "0.1.0"
+preview = ["pixi-build"]
 
 [tasks]
 configure = "nu scripts/configure.nu"
@@ -34,3 +35,24 @@ rocm-device-libs = ">=6,<7"
 [environments.default]
 features = ["base", "opencl", "level-zero", "cuda", "amd"]
 solve-group = "default"
+
+# ------------------------------------------------------------------------------
+# pixi-build package definition: allows other pixi workspaces to consume
+# slabkit as a source dependency, e.g. `slabkit = { path = "../slabkit" }`.
+# ------------------------------------------------------------------------------
+[package]
+name = "slabkit"
+version = "0.1.0"
+
+[package.build.backend]
+name = "pixi-build-cmake"
+version = "0.*"
+channels = ["https://prefix.dev/pixi-build-backends", "https://prefix.dev/conda-forge"]
+
+[package.build.config]
+# Header-only package: tests (which need the SYCL toolchain) stay off.
+extra-args = ["-DSLABKIT_BUILD_TESTS=OFF"]
+# Header-only: no translation units include these headers during the package
+# build, so the backend's ninja-based input tracking misses them. Without this
+# glob, edits to headers do NOT invalidate pixi's build cache.
+extra-input-globs = ["include/**/*.hpp"]
