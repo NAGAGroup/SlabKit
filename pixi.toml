@@ -1,12 +1,17 @@
 [workspace]
 authors = ["Jack Myers <jack@myersjack.dev>"]
-channels = ["https://prefix.dev/code-accelerate", "conda-forge"]
+channels = ["https://prefix.dev/jackm97/naga-labs"]
 name = "slabkit"
 platforms = ["linux-64"]
 version = "0.1.0"
 preview = ["pixi-build"]
 
-
+# Compiler selection (post-migration): variant stems, resolved by the backend
+# as <stem>_<target_platform> activation packages from the naga-labs channel.
+# Never name an activation package in a dep table; never add *_compiler_version.
+[workspace.build-variants]
+c_compiler = ["acpp-clang"]
+cxx_compiler = ["acpp-clangxx"]
 
 [feature.opencl.dependencies]
 intel-opencl-rt = ">=2025.2.0,<2026"
@@ -57,13 +62,17 @@ version = "0.1.0"
 
 [package.build.backend]
 name = "pixi-build-cmake"
-version = "0.*"
+version = "==0.4.5"
 channels = ["https://prefix.dev/pixi-build-backends", "https://prefix.dev/conda-forge"]
 
 [package.build-dependencies]
-acpp-toolchain = ">=20.1.8_acpp25.10.0,<21"
 cmake = ">=3.28,<4"
 ninja = ">=1.12"
+
+# SYCL headers + lib/cmake/AdaptiveCpp. The runtime arrives via run-export;
+# consumers must NOT write acpp-runtime or acpp-llvm themselves.
+[package.host-dependencies]
+acpp = ">=25.10.0,<25.11.0a0"
 
 [package.build.config]
 # Header-only package: tests (which need the SYCL toolchain) stay off.
@@ -76,6 +85,8 @@ extra-input-globs = ["include/**/*.hpp"]
 # ------------------------------------------------------------------------------
 # DEV: package dep closure (toolchain) + dev tools/tasks. Hardware-flavored
 # variants; dev-omp = CPU-only via acpp's built-in OpenMP host backend.
+# A dev env drives CMake directly (no backend), so it names the compiler
+# activation package explicitly — the one place that is correct.
 # ------------------------------------------------------------------------------
 [feature.dev.dev]
 slabkit = { path = "." }
@@ -83,6 +94,12 @@ slabkit = { path = "." }
 [feature.dev.dependencies]
 nushell = ">=0.110.0,<0.111"
 catch2 = ">=3.8"
+acpp = ">=25.10.0,<25.11.0a0"
+acpp-tools = ">=25.10.0,<25.11.0a0"
+
+[feature.dev.target.linux-64.dependencies]
+acpp-clangxx_linux-64 = ">=25.10.0,<25.11.0a0"
+acpp-clang_linux-64 = ">=25.10.0,<25.11.0a0"
 
 [feature.dev.tasks]
 configure = "nu scripts/configure.nu dev"
