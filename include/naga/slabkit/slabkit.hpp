@@ -1,16 +1,18 @@
 #pragma once
 
 // =============================================================================
-// slabkit/slabkit.hpp — convenience umbrella header
+// naga/slabkit/slabkit.hpp — umbrella
 // =============================================================================
 //
-// Includes all public SlabKit headers in dependency order.
-//
+// slabkit is USM device memory with owning handles: two families of free
+// functions -- malloc_* for uninitialized storage and make_* for constructed
+// objects -- over four placements: a queue, a device with its context, a
+// DeviceArena, a DevicePool. There are no array or view types; shapes belong
+// to consumers.
 
-#include "naga/slabkit/error.hpp"
-#include "naga/slabkit/context.hpp"
-#include "naga/slabkit/memory.hpp"
-#include "naga/slabkit/scratch.hpp"
-#include "naga/slabkit/array.hpp"
-
-namespace naga::slabkit {}  // Ensure namespace is available
+#include "naga/slabkit/arena.hpp"
+#include "naga/slabkit/handles.hpp"
+#include "naga/slabkit/make.hpp"
+#include "naga/slabkit/make_shared.hpp"
+#include "naga/slabkit/malloc.hpp"
+#include "naga/slabkit/pool.hpp"

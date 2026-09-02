@@ -1,3 +1,4 @@
 def main [preset: string = "default"] {
-  cmake --build $"(echo build | path join $preset)"
+  let dir = (["build" ($env.PIXI_ENVIRONMENT_NAME? | default $preset)] | path join)
+  cmake --build $dir
 }

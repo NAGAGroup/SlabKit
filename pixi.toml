@@ -69,17 +69,19 @@ channels = ["https://prefix.dev/pixi-build-backends", "https://prefix.dev/conda-
 cmake = ">=3.28,<4"
 ninja = ">=1.12"
 
-# SYCL headers + lib/cmake/AdaptiveCpp. The runtime arrives via run-export;
-# consumers must NOT write acpp-runtime or acpp-llvm themselves.
+# SYCL headers + lib/cmake/AdaptiveCpp. The library's own translation units
+# contain SYCL kernels, so the toolchain is a build requirement, not just a
+# test one. The runtime arrives via run-export; consumers must NOT write
+# acpp-runtime or acpp-llvm themselves.
 [package.host-dependencies]
 acpp = ">=25.10.0,<25.11.0a0"
 
 [package.build.config]
-# Header-only package: tests (which need the SYCL toolchain) stay off.
+# Tests need Catch2, which the package build does not carry.
 extra-args = ["-DSLABKIT_BUILD_TESTS=OFF"]
-# Header-only: no translation units include these headers during the package
-# build, so the backend's ninja-based input tracking misses them. Without this
-# glob, edits to headers do NOT invalidate pixi's build cache.
+# Headers are installed but not compiled by the package build, so the
+# backend's ninja-based input tracking does not see them. Without this glob,
+# editing a header does NOT invalidate pixi's build cache.
 extra-input-globs = ["include/**/*.hpp"]
 
 # ------------------------------------------------------------------------------
