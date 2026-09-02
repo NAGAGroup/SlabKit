@@ -16,7 +16,8 @@ over four placement targets, one handle type.
   in every form, with the object(s) constructed ON THE DEVICE. This is
   the door through which types that are not device-copyable enter
   kernels at all: the object is built where it lives, and the pointer to
-  it — which IS device-copyable — is what kernels capture.
+  it — which IS device-copyable — is what kernels capture. Why: cospan
+  ledger §2.1 user types on the device.
 
 There are no array or view types and no context object: higher-level
 shapes belong to consumers. `DeviceArena` and `DevicePool` are
@@ -62,7 +63,8 @@ template <class T> using shared_device_ptr = std::shared_ptr<T>;   // deleter er
 ///   DevicePool      -> pool route
 /// THERE IS NO sycl::context ANYWHERE IN SLABKIT: everything uses the
 /// runtime's default context. Managing contexts is a niche the library
-/// does not serve.
+/// does not serve. Why: cospan ledger §2.5 (explicit device control is
+/// the floor; contexts were never a need).
 template <class W> concept MemoryTarget =
     std::same_as<W, sycl::queue> || std::same_as<W, sycl::device> ||
     std::same_as<W, DeviceArena> || std::same_as<W, DevicePool>;
@@ -162,7 +164,7 @@ template <class H> struct Initialized { H handle; sycl::event ready; };
 // -----------------------------------------------------------------------------
 /// Bump region over one USM slab. DeviceArena is a LIGHT HANDLE over a
 /// shared implementation: copyable and movable; copies refer to the same
-/// slab. Allocations pin the slab (§2), so an arena may be passed around,
+/// slab. Allocations pin the slab (§2; why: cospan ledger P9), so an arena may be passed around,
 /// stored by value, or dropped while its allocations live. There is no
 /// per-allocation free. Markers/unwind retained for consumers that stack.
 class DeviceArena {
