@@ -33,15 +33,20 @@ namespace naga::slabkit {
 /// One deleter for every route. It stores exactly what release needs:
 ///   os:    sycl::free(ptr, ctx) — ctx held BY VALUE (sycl::context is a
 ///          reference-counted handle; no lifetime coupling);
-///   pool:  pool->release(ptr, node_count);
-///   arena: no-op — the arena owns the bytes.
-/// The deleter never runs a destructor (see §4.3).
+///   pool:  impl->release(ptr, node_count);
+///   arena: no free — the arena owns the bytes.
+/// For the pool and arena routes the deleter holds a shared_ptr to the
+/// memory object's IMPLEMENTATION: an outstanding allocation keeps its
+/// slab alive by construction. There is no "the pool must outlive its
+/// handles" contract to remember — the last of {handles to the object,
+/// allocations from it} frees the slab. The deleter never runs a
+/// destructor (see §5.2).
 struct DeviceDeleter {
     enum class Route : uint8_t { os, pool, arena };
-    Route         route;
-    sycl::context ctx;             // os route
-    DevicePool*   pool;            // pool route
-    size_t        node_count;      // pool route
+    Route                         route;
+    sycl::context                 ctx;          // os route
+    std::shared_ptr<detail::Slab> slab;         // pool / arena route: pins the slab
+    size_t                        node_count;   // pool route
     void operator()(void*) const noexcept;
 };
 template <class T> using unique_device_ptr = std::unique_ptr<T, DeviceDeleter>;
@@ -162,18 +167,19 @@ template <class H> struct Initialized { H handle; sycl::event ready; };
 // -----------------------------------------------------------------------------
 // 6. The memory objects — no allocation API on either
 // -----------------------------------------------------------------------------
-/// Bump region over one USM slab (allocated at construction). Allocations
-/// live as long as the arena; there is no per-allocation free. Handles
-/// from an arena carry the no-op route so callers hold ONE handle type
-/// regardless of where memory came from. Markers/unwind retained for
-/// consumers that stack.
+/// Bump region over one USM slab. DeviceArena is a LIGHT HANDLE over a
+/// shared implementation: copyable and movable; copies refer to the same
+/// slab. Allocations pin the slab (§2), so an arena may be passed around,
+/// stored by value, or dropped while its allocations live. There is no
+/// per-allocation free. Markers/unwind retained for consumers that stack.
 class DeviceArena {
 public:
     using Marker = size_t;
     DeviceArena(const sycl::queue& q, size_t bytes);
     DeviceArena(const Placement&, size_t bytes);
-    DeviceArena(const DeviceArena&) = delete;      // movable
-    ~DeviceArena();                                // frees the slab
+    DeviceArena(const DeviceArena&) = default;     // shared handle
+    DeviceArena(DeviceArena&&) noexcept = default;
+    ~DeviceArena();                                // releases this handle's share
     Marker top() const;  void unwind(Marker);  void reset();
     size_t capacity() const;  size_t used() const;  size_t remaining() const;
     const sycl::device& device() const;  const sycl::context& context() const;
@@ -184,15 +190,16 @@ private:
 
 /// Fixed-node free-list over one USM slab in `node_size` slots (two-level
 /// bitmap; O(1) node, O(N/64) contiguous array; mutex-protected;
-/// double-free asserted). LIFETIME CONTRACT — the user's, by design: a
-/// pool outlives every handle it issued. The destructor checks
-/// outstanding() == 0 and reports a violation (assert in debug, logged
-/// error in release) rather than freeing memory something still holds.
+/// double-free asserted). A LIGHT HANDLE over a shared implementation,
+/// like DeviceArena: copyable, movable, storable by value. Allocations
+/// pin the slab, so no lifetime contract exists; outstanding() is
+/// information for profiling.
 class DevicePool {
 public:
     DevicePool(const sycl::queue& q, size_t bytes, size_t node_size = 1024);
     DevicePool(const Placement&, size_t bytes, size_t node_size = 1024);
-    DevicePool(const DevicePool&) = delete;        // NON-movable (handles hold its address)
+    DevicePool(const DevicePool&) = default;       // shared handle
+    DevicePool(DevicePool&&) noexcept = default;
     ~DevicePool();
     size_t node_size() const;  size_t slot_count() const;
     size_t free_count() const; size_t outstanding() const;
