@@ -28,7 +28,7 @@
 //
 // THE TYPE GATE:
 //   * T is trivially destructible -- the handle has no queue to run ~T on;
-//   * T is NOT polymorphic -- see the static_assert message;
+//   * T is NOT polymorphic -- see device_object below for why;
 //   * arguments are device-copyable, since they are kernel captures;
 //   * array forms require trivially copyable elements.
 // The constructor's device-callability is enforced by the compiler when the

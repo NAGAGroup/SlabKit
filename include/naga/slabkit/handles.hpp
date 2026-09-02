@@ -24,10 +24,8 @@
 // The deleter NEVER runs a destructor. Objects made by the make_* family are
 // required to be trivially destructible, so there is nothing to run.
 //
-// NOTE ON LAYERING: DeviceDeleter::operator() is declared here and defined in
-// detail/deleter_impl.hpp, which is included once the pool and arena
-// implementations are complete types. Every public slabkit header pulls that
-// definition in, so the two-step is invisible to callers.
+// DeviceDeleter::operator() is declared here and compiled into the library,
+// so a consumer never sees the pool and arena implementations it needs.
 
 #include <cstddef>
 #include <memory>
