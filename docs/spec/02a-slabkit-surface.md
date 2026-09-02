@@ -31,8 +31,7 @@ namespace naga::slabkit {
 // 2. Handles
 // -----------------------------------------------------------------------------
 /// One deleter for every route. It stores exactly what release needs:
-///   os:    sycl::free(ptr, ctx) — ctx held BY VALUE (sycl::context is a
-///          reference-counted handle; no lifetime coupling);
+///   os:    sycl::free(ptr, <default context>);
 ///   pool:  impl->release(ptr, node_count);
 ///   arena: no free — the arena owns the bytes.
 /// For the pool and arena routes the deleter holds a shared_ptr to the
@@ -44,7 +43,6 @@ namespace naga::slabkit {
 struct DeviceDeleter {
     enum class Route : uint8_t { os, pool, arena };
     Route                         route;
-    sycl::context                 ctx;          // os route
     std::shared_ptr<detail::Slab> slab;         // pool / arena route: pins the slab
     size_t                        node_count;   // pool route
     void operator()(void*) const noexcept;
@@ -59,19 +57,16 @@ template <class T> using shared_device_ptr = std::shared_ptr<T>;   // deleter er
 // 3. Placement targets
 // -----------------------------------------------------------------------------
 /// Every allocation names WHERE. Four kinds satisfy the concept:
-///   sycl::queue     -> OS route in q.get_context() for q.get_device()
-///   Placement       -> OS route, explicit device + context
+///   sycl::queue     -> OS route for q.get_device()
+///   sycl::device    -> OS route, explicit device
 ///   DeviceArena     -> arena route
 ///   DevicePool      -> pool route
-struct Placement { sycl::device dev; sycl::context ctx; };
+/// THERE IS NO sycl::context ANYWHERE IN SLABKIT: everything uses the
+/// runtime's default context. Managing contexts is a niche the library
+/// does not serve.
 template <class W> concept MemoryTarget =
-    std::same_as<W, sycl::queue> || std::same_as<W, Placement> ||
+    std::same_as<W, sycl::queue> || std::same_as<W, sycl::device> ||
     std::same_as<W, DeviceArena> || std::same_as<W, DevicePool>;
-
-/// MULTI-DEVICE-QUEUE TOUCHPOINT: the queue target allocates in
-/// q.get_context() for q.get_device(). For an acpp multi-device queue
-/// the extension's own USM semantics apply — NON-NORMATIVE until
-/// verified against the extension's documentation.
 
 // -----------------------------------------------------------------------------
 // 4. STORAGE: the malloc family — uninitialized, SYCL mirrored
@@ -82,8 +77,8 @@ template <class T, MemoryTarget W>
 unique_device_ptr<T> aligned_alloc_device(size_t align, size_t count, W& where);
 /// shared/host memory has no arena/pool form (slabs are device USM):
 template <class T> unique_device_ptr<T> malloc_shared(size_t count, const sycl::queue&);
-template <class T> unique_device_ptr<T> malloc_shared(size_t count, const Placement&);
-template <class T> unique_device_ptr<T> malloc_host  (size_t count, const sycl::context&);
+template <class T> unique_device_ptr<T> malloc_shared(size_t count, const sycl::device&);
+template <class T> unique_device_ptr<T> malloc_host  (size_t count);
 /// aligned_alloc_shared / aligned_alloc_host mirror SYCL likewise.
 
 /// Non-throwing probe for consumers composing fallback chains (cospan's
@@ -176,13 +171,13 @@ class DeviceArena {
 public:
     using Marker = size_t;
     DeviceArena(const sycl::queue& q, size_t bytes);
-    DeviceArena(const Placement&, size_t bytes);
+    DeviceArena(const sycl::device&, size_t bytes);
     DeviceArena(const DeviceArena&) = default;     // shared handle
     DeviceArena(DeviceArena&&) noexcept = default;
     ~DeviceArena();                                // releases this handle's share
     Marker top() const;  void unwind(Marker);  void reset();
     size_t capacity() const;  size_t used() const;  size_t remaining() const;
-    const sycl::device& device() const;  const sycl::context& context() const;
+    const sycl::device& device() const;
 private:
     void* bump(size_t bytes, size_t align);        // throws ArenaFull
     friend struct detail::Allocate;                // the free functions' one door
@@ -197,13 +192,13 @@ private:
 class DevicePool {
 public:
     DevicePool(const sycl::queue& q, size_t bytes, size_t node_size = 1024);
-    DevicePool(const Placement&, size_t bytes, size_t node_size = 1024);
+    DevicePool(const sycl::device&, size_t bytes, size_t node_size = 1024);
     DevicePool(const DevicePool&) = default;       // shared handle
     DevicePool(DevicePool&&) noexcept = default;
     ~DevicePool();
     size_t node_size() const;  size_t slot_count() const;
     size_t free_count() const; size_t outstanding() const;
-    const sycl::device& device() const;  const sycl::context& context() const;
+    const sycl::device& device() const;
 private:
     void* take(size_t node_count);                 // throws PoolExhausted | Fragmented
     void  release(void*, size_t node_count) noexcept;
