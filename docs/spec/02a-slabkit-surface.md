@@ -1,8 +1,7 @@
 # Spec 02.A — slabkit surface
 
-Phase-2 chunk A of the CospanMDAO redesign spec (`cospan/docs/spec/PLAN.md`);
-this document lives in slabkit because slabkit owns the surface. Binding
-contract; declarations only.
+The slabkit surface, as CospanMDAO's memory substrate consumes it.
+Binding contract; declarations only.
 
 ## 1. What slabkit is
 
@@ -19,8 +18,8 @@ over four placement targets, one handle type.
   kernels at all: the object is built where it lives, and the pointer to
   it — which IS device-copyable — is what kernels capture.
 
-`DeviceArray`, `DeviceView`, `DeviceScratchView`, `make_scratch`, `Context`
-and `ContextBuilder` are DELETED. `DeviceArena` and `DevicePool` are
+There are no array or view types and no context object: higher-level
+shapes belong to consumers. `DeviceArena` and `DevicePool` are
 memory, not allocators: they expose NO allocation methods; the free
 functions are the only allocation API.
 
@@ -106,9 +105,8 @@ std::optional<unique_device_ptr<T>> try_malloc_device(size_t count, DevicePool& 
 ///     device-correct. (Host-constructing a polymorphic object and
 ///     copying its bytes plants a HOST vtable pointer on the device;
 ///     this path exists to make that mistake unwritable.)
-///     Verified: acpp generic accepts device placement-new of a
-///     polymorphic, non-trivially-copyable type and virtual dispatch on
-///     the result.
+///     acpp generic accepts device placement-new of a polymorphic,
+///     non-trivially-copyable type and virtual dispatch on the result.
 ///
 /// 5.2 THE TYPE GATE (concept-checked; failure is a compile error):
 ///   * T's constructor is device-callable and every argument is
