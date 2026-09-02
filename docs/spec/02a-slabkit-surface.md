@@ -5,218 +5,198 @@ Binding contract; declarations only.
 
 ## 1. What slabkit is
 
-USM device memory with RAII handles. No global state, no Context, no device
-registry: every memory object is ONE device, ONE strategy, owned by the
-user, who composes as many as they need. Two families of free functions
-over four placement targets, one handle type.
+USM device memory with owning handles. Two families of free functions —
+**storage** (`malloc_*`: uninitialized bytes, SYCL's USM API mirrored
+signature-for-signature, returning handles instead of raw pointers) and
+**objects** (`make_*`: `std::make_unique`/`std::make_shared` in every
+form, constructed on the device) — over four kinds of **placement** (a
+queue, a device with its context, an arena, a pool), yielding one handle
+type. Why: cospan ledger §2.1 user types on the device.
 
-- **STORAGE — the `malloc` family**: uninitialized bytes, SYCL's USM API
-  mirrored name-for-name, returning handles instead of raw pointers.
-- **OBJECTS — the `make` family**: `std::make_unique`/`std::make_shared`
-  in every form, with the object(s) constructed ON THE DEVICE. This is
-  the door through which types that are not device-copyable enter
-  kernels at all: the object is built where it lives, and the pointer to
-  it — which IS device-copyable — is what kernels capture. Why: cospan
-  ledger §2.1 user types on the device.
+There are no array or view types: shapes belong to consumers.
+`DeviceArena` and `DevicePool` are memory, not allocators: they expose no
+allocation methods; the free functions are the only allocation API.
 
-There are no array or view types and no context object: higher-level
-shapes belong to consumers. `DeviceArena` and `DevicePool` are
-memory, not allocators: they expose NO allocation methods; the free
-functions are the only allocation API.
+**Contracts are borrowed, not invented.** `malloc_*` behaves exactly as
+`sycl::malloc_*`: null when SYCL returns null (allocation failure, zero
+bytes), and null when an arena or pool cannot satisfy the request.
+`make_*` behaves exactly as `std::make_*`: returns with the object ready,
+throws `std::bad_alloc` when storage cannot be obtained. Usage errors — a
+pool node size that is not a power of two, an alignment a pool cannot
+honor — are `std::invalid_argument`. There is no library exception type.
+
+**Contexts are held, never managed.** One `sycl::context` per device,
+created once by whoever owns the device and kept for as long as the
+device is used. slabkit stores the context it was given and frees with
+it — correct on every conforming SYCL, not only where the runtime happens
+to ignore it. Managing several contexts per device (emulating multiple
+devices on one, isolating pointers) is a niche the library does not
+serve.
+
+**One place frees memory.** Every slab an arena or pool owns is itself an
+allocation from this library's slabless API, so `sycl::free` is called
+from exactly one deleter and no class in the library has a destructor of
+its own. Why: cospan ledger P9.
 
 ```cpp
 namespace naga::slabkit {
 
 // -----------------------------------------------------------------------------
-// 2. Handles
+// 2. Handles — three deleters, one handle type
 // -----------------------------------------------------------------------------
-/// One deleter for every route. It stores exactly what release needs:
-///   os:    sycl::free(ptr, <default context>);
-///   pool:  impl->release(ptr, node_count);
-///   arena: no free — the arena owns the bytes.
-/// For the pool and arena routes the deleter holds a shared_ptr to the
-/// memory object's IMPLEMENTATION: an outstanding allocation keeps its
-/// slab alive by construction. There is no "the pool must outlive its
-/// handles" contract to remember — the last of {handles to the object,
-/// allocations from it} frees the slab. The deleter never runs a
-/// destructor (see §5.2).
+struct OsFree    { sycl::context ctx; };                                     // sycl::free(p, ctx)
+struct PoolFree  { std::shared_ptr<detail::PoolImpl>  impl; size_t nodes; }; // impl->release(p, nodes)
+struct ArenaFree { std::shared_ptr<detail::ArenaImpl> impl; };               // nothing: the arena owns the bytes
+
+/// The deleter holds exactly what release needs. OsFree is the only one
+/// that frees memory; the other two account for it. For the pool and
+/// arena routes the deleter holds a share of the memory object's
+/// implementation: an outstanding allocation keeps its slab alive by
+/// construction, and the slab is freed by the last of {handles to the
+/// object, allocations from it}. There is no lifetime contract to
+/// remember. Why: cospan ledger P9. The deleter never runs a destructor
+/// (§5.2).
 struct DeviceDeleter {
-    enum class Route : uint8_t { os, pool, arena };
-    Route                         route;
-    std::shared_ptr<detail::Slab> slab;         // pool / arena route: pins the slab
-    size_t                        node_count;   // pool route
-    void operator()(void*) const noexcept;
+    std::variant<OsFree, PoolFree, ArenaFree> how;
+    void operator()(void* p) const noexcept;
 };
 template <class T> using unique_device_ptr = std::unique_ptr<T, DeviceDeleter>;
 template <class T> using shared_device_ptr = std::shared_ptr<T>;   // deleter erased
 
-/// AllocationError::Reason: { OutOfMemory, ArenaFull, PoolExhausted,
-/// Fragmented }. No function in this library returns a null handle.
-
 // -----------------------------------------------------------------------------
-// 3. Placement targets
+// 3. Placement — where memory comes from
 // -----------------------------------------------------------------------------
-/// Every allocation names WHERE. Four kinds satisfy the concept:
-///   sycl::queue     -> OS route for q.get_device()
-///   sycl::device    -> OS route, explicit device
-///   DeviceArena     -> arena route
-///   DevicePool      -> pool route
-/// THERE IS NO sycl::context ANYWHERE IN SLABKIT: everything uses the
-/// runtime's default context. Managing contexts is a niche the library
-/// does not serve. Why: cospan ledger §2.5 (explicit device control is
-/// the floor; contexts were never a need).
-template <class W> concept MemoryTarget =
-    std::same_as<W, sycl::queue> || std::same_as<W, sycl::device> ||
-    std::same_as<W, DeviceArena> || std::same_as<W, DevicePool>;
-
-// -----------------------------------------------------------------------------
-// 4. STORAGE: the malloc family — uninitialized, SYCL mirrored
-// -----------------------------------------------------------------------------
-template <class T, MemoryTarget W>
-unique_device_ptr<T> malloc_device(size_t count, W& where);
-template <class T, MemoryTarget W>
-unique_device_ptr<T> aligned_alloc_device(size_t align, size_t count, W& where);
-/// shared/host memory has no arena/pool form (slabs are device USM):
-template <class T> unique_device_ptr<T> malloc_shared(size_t count, const sycl::queue&);
-template <class T> unique_device_ptr<T> malloc_shared(size_t count, const sycl::device&);
-template <class T> unique_device_ptr<T> malloc_host  (size_t count);
-/// aligned_alloc_shared / aligned_alloc_host mirror SYCL likewise.
-
-/// Non-throwing probe for consumers composing fallback chains (cospan's
-/// dynamic chain lives in cospan, not here) — the ONLY allocation
-/// function that can return empty:
-template <class T>
-std::optional<unique_device_ptr<T>> try_malloc_device(size_t count, DevicePool& pool);
-
-// -----------------------------------------------------------------------------
-// 5. OBJECTS: the make family — constructed on the device
-// -----------------------------------------------------------------------------
-/// The std::make_unique / std::make_shared forms, every one. The queue
-/// that performs initialization comes first, the placement target second
-/// (defaults to the queue itself). Initialization is ENQUEUED on q: the
-/// handle is valid immediately, its contents once q reaches the op —
-/// in-order queues give the natural ordering; out-of-order users take
-/// the `_ev` twin (§5.4).
+/// Four kinds, each an overload set below:
+///   sycl::queue                    -> the queue's device and context
+///   sycl::device + sycl::context   -> that device, freed with that context
+///   DeviceArena                    -> bump region
+///   DevicePool                     -> fixed-node free list
 ///
-/// 5.1 INITIALIZATION MECHANISM — chosen by type, at compile time:
-///   * trivially copyable T: construct on the host, then q.memcpy (or
-///     q.fill for broadcast forms). No device code involved.
-///   * otherwise: allocate storage, then ONE single_task performing
-///     placement-new with the forwarded arguments — the constructor runs
-///     where the object lives, so every invariant, pointer and vtable is
-///     device-correct. (Host-constructing a polymorphic object and
-///     copying its bytes plants a HOST vtable pointer on the device;
-///     this path exists to make that mistake unwritable.)
-///     acpp generic accepts device placement-new of a polymorphic,
-///     non-trivially-copyable type and virtual dispatch on the result.
+/// WHICH FORM. Allocating for the device a queue was constructed for: the
+/// queue forms — same device, same context, nothing to get wrong.
+/// Allocating for any other device (retargeting queues,
+/// ACPP_EXT_CG_PROPERTY_RETARGET): the device+context forms with THAT
+/// device's one context. Choosing the device+context forms for everything
+/// is legitimate and keeps allocation uniform; the single obligation is
+/// that the context passed for a queue's own device is the context the
+/// queue owns — construct the context first and the queue from it.
+
+// -----------------------------------------------------------------------------
+// 4. STORAGE — the malloc family
+// -----------------------------------------------------------------------------
+/// SYCL's signatures with T* replaced by a handle; <std::byte> is the
+/// void* form. Alignment: queue and device forms as SYCL; an arena honors
+/// any alignment; a pool's allocations are node_size-aligned and a larger
+/// request is std::invalid_argument.
+template <class T> unique_device_ptr<T> malloc_device(size_t count, const sycl::queue& q,
+                                                      const sycl::property_list& props = {});
+template <class T> unique_device_ptr<T> malloc_device(size_t count, const sycl::device& dev,
+                                                      const sycl::context& ctx,
+                                                      const sycl::property_list& props = {});
+template <class T> unique_device_ptr<T> malloc_device(size_t count, DeviceArena& arena);
+template <class T> unique_device_ptr<T> malloc_device(size_t count, DevicePool& pool);
+
+template <class T> unique_device_ptr<T> aligned_alloc_device(size_t align, size_t count, const sycl::queue& q,
+                                                             const sycl::property_list& props = {});
+template <class T> unique_device_ptr<T> aligned_alloc_device(size_t align, size_t count, const sycl::device& dev,
+                                                             const sycl::context& ctx,
+                                                             const sycl::property_list& props = {});
+template <class T> unique_device_ptr<T> aligned_alloc_device(size_t align, size_t count, DeviceArena& arena);
+template <class T> unique_device_ptr<T> aligned_alloc_device(size_t align, size_t count, DevicePool& pool);
+
+// -----------------------------------------------------------------------------
+// 5. OBJECTS — the make family
+// -----------------------------------------------------------------------------
+/// The initialization queue comes first, the placement second; placement
+/// omitted means the queue's own device and context. Returns when the
+/// object is READY — initialization is enqueued only because that is how
+/// device memory is written, and it is waited on before return. With a
+/// device placement other than q's device, initialization is submitted
+/// with AdaptiveCpp_retarget{dev}; q must be retargetable.
 ///
-/// 5.2 THE TYPE GATE (concept-checked; failure is a compile error):
-///   * T's constructor is device-callable and every argument is
-///     device-copyable (arguments are captured into the kernel);
-///   * T is TRIVIALLY DESTRUCTIBLE. The deleter frees storage and has no
-///     queue to run ~T on; supporting a non-trivial destructor would
-///     couple the handle to a queue for life. A non-trivial destructor
-///     is refused at the make_* call, with the reason in the message.
-///   Array forms (value-init, fill, copy) go through q.fill/q.memcpy and
-///   therefore require trivially copyable elements.
-
-// 5.3 forms — unique
-template <class T, MemoryTarget W = sycl::queue, class... Args>
-unique_device_ptr<T> make_unique_device(sycl::queue& q, W& where, Args&&... args);
-template <class T, MemoryTarget W = sycl::queue>
-unique_device_ptr<T> make_unique_device_for_overwrite(sycl::queue& q, W& where);
-                                              // storage only == malloc_device<T>(1)
-template <class TArr, MemoryTarget W = sycl::queue>            // TArr = T[]
-unique_device_ptr<TArr> make_unique_device(sycl::queue& q, W& where, size_t n);
-                                              // value-initialized (T{}; memset 0 when trivial)
-template <class TArr, MemoryTarget W = sycl::queue>
-unique_device_ptr<TArr> make_unique_device_for_overwrite(sycl::queue& q, W& where, size_t n);
-                                              // uninitialized
-/// slabkit extensions beyond std (no std spelling exists):
-template <class TArr, MemoryTarget W = sycl::queue>            // fill
-unique_device_ptr<TArr> make_unique_device(sycl::queue& q, W& where, size_t n,
-                                           const std::remove_extent_t<TArr>& value);
-template <class TArr, MemoryTarget W = sycl::queue>            // copy from host
-unique_device_ptr<TArr> make_unique_device(sycl::queue& q, W& where,
-                                           std::span<const std::remove_extent_t<TArr>> src);
-
-// 5.3 forms — shared: the identical set, returning shared_device_ptr
-template <class T, MemoryTarget W = sycl::queue, class... Args>
-shared_device_ptr<T> make_shared_device(sycl::queue& q, W& where, Args&&... args);
-template <class T, MemoryTarget W = sycl::queue>
-shared_device_ptr<T> make_shared_device_for_overwrite(sycl::queue& q, W& where);
-template <class TArr, MemoryTarget W = sycl::queue>
-shared_device_ptr<TArr> make_shared_device(sycl::queue& q, W& where, size_t n);
-template <class TArr, MemoryTarget W = sycl::queue>
-shared_device_ptr<TArr> make_shared_device_for_overwrite(sycl::queue& q, W& where, size_t n);
-template <class TArr, MemoryTarget W = sycl::queue>
-shared_device_ptr<TArr> make_shared_device(sycl::queue& q, W& where, size_t n,
-                                           const std::remove_extent_t<TArr>& value);
-template <class TArr, MemoryTarget W = sycl::queue>
-shared_device_ptr<TArr> make_shared_device(sycl::queue& q, W& where,
-                                           std::span<const std::remove_extent_t<TArr>> src);
-
-// 5.4 event form — every make_* form has an `_ev` twin:
-template <class H> struct Initialized { H handle; sycl::event ready; };
+/// 5.1 MECHANISM, chosen by type at compile time:
+///   * trivially copyable T: constructed on the host, written with q.fill
+///     (single object and fill forms; the pattern is taken by value) or
+///     q.memcpy (copy forms). No device code.
+///   * otherwise: storage, then ONE single_task performing placement-new
+///     with the forwarded arguments — the constructor runs where the
+///     object lives, so every invariant, pointer and vtable is
+///     device-correct. This is the door for types that are not
+///     device-copyable; host-constructing a polymorphic object and copying
+///     its bytes would plant a host vtable on the device, and this path
+///     makes that mistake unwritable.
+/// 5.2 THE TYPE GATE (concept-checked):
+///   * T is trivially destructible — the handle has no queue to run ~T on;
+///   * every argument is device-copyable (arguments are kernel captures);
+///   * array forms require trivially copyable elements (they go through
+///     fill/memcpy).
+///   The constructor's device-callability is enforced by the compiler at
+///   kernel instantiation.
+/// 5.3 The forms. `P` stands for each placement overload:
+///   (sycl::queue& q) · (q, const sycl::device&, const sycl::context&) ·
+///   (q, DeviceArena&) · (q, DevicePool&). `E` = std::remove_extent_t<TArr>.
+template <class T,    class... Args> unique_device_ptr<T>    make_unique_device(P, Args&&... args);
+template <class T>                   unique_device_ptr<T>    make_unique_device_for_overwrite(P);   // storage only
+template <class TArr>                unique_device_ptr<TArr> make_unique_device(P, size_t n);       // value-initialized
+template <class TArr>                unique_device_ptr<TArr> make_unique_device_for_overwrite(P, size_t n);
+template <class TArr>                unique_device_ptr<TArr> make_unique_device(P, size_t n, const E& value);  // fill
+template <class TArr>                unique_device_ptr<TArr> make_unique_device(P, std::span<const E> src);   // copy
+// make_shared_device: the identical six, returning shared_device_ptr.
 
 // -----------------------------------------------------------------------------
-// 6. The memory objects — no allocation API on either
+// 6. Memory objects — placement only, no allocation API
 // -----------------------------------------------------------------------------
-/// Bump region over one USM slab. DeviceArena is a LIGHT HANDLE over a
-/// shared implementation: copyable and movable; copies refer to the same
-/// slab. Allocations pin the slab (§2; why: cospan ledger P9), so an arena may be passed around,
-/// stored by value, or dropped while its allocations live. There is no
-/// per-allocation free. Markers/unwind retained for consumers that stack.
+/// Each memory object owns its slab as a slabless allocation from this
+/// library (unique_device_ptr<std::byte> obtained through the
+/// device+context form), so it stores its context and frees exactly like
+/// any other allocation, and has no destructor of its own.
+
+/// Bump region over one USM slab. A light handle over a shared
+/// implementation: copyable and movable, copies refer to the same slab,
+/// allocations pin it. No per-allocation free and no rewind: the slab is
+/// released when the last handle and the last allocation are gone. Bump
+/// is lock-free.
 class DeviceArena {
 public:
-    using Marker = size_t;
-    DeviceArena(const sycl::queue& q, size_t bytes);
-    DeviceArena(const sycl::device&, size_t bytes);
-    DeviceArena(const DeviceArena&) = default;     // shared handle
-    DeviceArena(DeviceArena&&) noexcept = default;
-    ~DeviceArena();                                // releases this handle's share
-    Marker top() const;  void unwind(Marker);  void reset();
+    DeviceArena(const sycl::queue& q, size_t bytes, const sycl::property_list& props = {});
+    DeviceArena(const sycl::device& dev, const sycl::context& ctx, size_t bytes,
+                const sycl::property_list& props = {});
     size_t capacity() const;  size_t used() const;  size_t remaining() const;
-    const sycl::device& device() const;
-private:
-    void* bump(size_t bytes, size_t align);        // throws ArenaFull
-    friend struct detail::Allocate;                // the free functions' one door
+    const sycl::device&  device()  const;
+    const sycl::context& context() const;
 };
 
-/// Fixed-node free-list over one USM slab in `node_size` slots (two-level
-/// bitmap; O(1) node, O(N/64) contiguous array; mutex-protected;
-/// double-free asserted). A LIGHT HANDLE over a shared implementation,
-/// like DeviceArena: copyable, movable, storable by value. Allocations
-/// pin the slab, so no lifetime contract exists; outstanding() is
-/// information for profiling.
+/// Fixed-node free list over one USM slab in node_size slots (a power of
+/// two, else std::invalid_argument): two-level bitmap, O(1) for one node,
+/// O(N/64) for a contiguous run; mutex-protected; double release
+/// asserted. Same handle model as DeviceArena. outstanding() is
+/// information.
 class DevicePool {
 public:
-    DevicePool(const sycl::queue& q, size_t bytes, size_t node_size = 1024);
-    DevicePool(const sycl::device&, size_t bytes, size_t node_size = 1024);
-    DevicePool(const DevicePool&) = default;       // shared handle
-    DevicePool(DevicePool&&) noexcept = default;
-    ~DevicePool();
+    DevicePool(const sycl::queue& q, size_t bytes, size_t node_size = 1024,
+               const sycl::property_list& props = {});
+    DevicePool(const sycl::device& dev, const sycl::context& ctx, size_t bytes,
+               size_t node_size = 1024, const sycl::property_list& props = {});
     size_t node_size() const;  size_t slot_count() const;
     size_t free_count() const; size_t outstanding() const;
-    const sycl::device& device() const;
-private:
-    void* take(size_t node_count);                 // throws PoolExhausted | Fragmented
-    void  release(void*, size_t node_count) noexcept;
-    friend struct detail::Allocate;  friend struct DeviceDeleter;
+    const sycl::device&  device()  const;
+    const sycl::context& context() const;
 };
 
 } // namespace naga::slabkit
 ```
 
-## 7. What cospan builds from this (forward-link: 02.B, 02.C)
+## 7. What cospan builds from this
 
-`Model` holds, per device it runs on, one `DeviceArena` sized by the
-finalize accumulation pass (durable ∧ static entries) and optionally one
-`DevicePool` sized by the single user knob (default: none). The dynamic
-chain is three lines in cospan: `pool ? try_malloc_device<T>(n, *pool) :
-nullopt` → `malloc_device<T>(n, q)` → throw. `OutputEntry` owns
-`unique_device_ptr<std::byte>` + capacity — the "smart pointer to data"
-01.B left open — obtained via `make_unique_device_for_overwrite<std::byte[]>`
-against the Model's chosen target, and never inspects the route.
-Transient launch streams (01.C/01.E) are plain handles scoped to the
-forward call.
+Per device it runs on, `Model` holds a `MemorySubstrate { sycl::context
+ctx; DeviceArena arena; std::optional<DevicePool> pool; }`, keyed by
+`sycl::device`. Construction order is the invariant: the default device's
+context is created first and both queues are constructed from it; every
+other device gets its own `context{dev}`; arenas and pools are built from
+`(dev, ctx)`. Subsystems allocate through their substrate's `(device,
+context)` for every device, the default included, and never learn which
+device the queues were constructed for. The dynamic chain is three lines
+in cospan: `malloc_device<T>(n, *pool)`, else `malloc_device<T>(n, dev,
+ctx)`, else throw. An entry's storage is a `unique_device_ptr<std::byte[]>`
+plus capacity, obtained through `make_unique_device_for_overwrite<std::byte[]>`
+against the substrate, never inspecting the route.
