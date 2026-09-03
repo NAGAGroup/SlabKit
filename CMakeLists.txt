@@ -21,6 +21,7 @@ find_package(Threads REQUIRED)
 set(SLABKIT_SOURCES
     src/capabilities.cpp
     src/context.cpp
+    src/queue.cpp
     src/deleter.cpp
     src/arena.cpp
     src/pool.cpp

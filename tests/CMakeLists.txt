@@ -8,6 +8,7 @@ endfunction()
 add_sycl_executable(slabkit_tests
     test_capabilities.cpp
     test_context.cpp
+    test_queue.cpp
     test_handles.cpp
     test_arena.cpp
     test_pool.cpp
