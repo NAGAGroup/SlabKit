@@ -217,12 +217,23 @@ TEST_CASE("group members are given the chance to run concurrently", "[queue]") {
     s.release(seen);
 }
 
+/// A recurrence the optimizer cannot fold away and the host can reproduce
+/// exactly. The instrument matters: a producer spelled `acc = acc + 0` in a loop
+/// is deleted at -O2, and both of the spikes that first measured this defect
+/// were measuring nothing.
+inline unsigned churn(unsigned seed, int rounds) {
+    unsigned acc = seed;
+    for (int i = 0; i < rounds; ++i) acc = acc * 1103515245u + 12345u;
+    return acc;
+}
+
 TEST_CASE("the stream's order holds ACROSS backends", "[queue]") {
-    // The regression test for the finding that shaped this class: on acpp
-    // 2026.09.03 a depends_on that CROSSES a backend is unreliable -- in this
-    // exact shape (OMP producer, OMP memcpy, CUDA memcpy) it was wrong 20 of 20
-    // times in raw SYCL, silently. The stream buys the edge back with a
-    // host-side wait at the transition; this is what proves it stays bought.
+    // The regression test for the finding that shaped this class. A copy whose
+    // host operand is not USM in the issuing queue's context has that operand
+    // read when the copy is ISSUED, so a dependency cannot protect it: with no
+    // host wait at the transition this shape is wrong 40 times in 40. The stream
+    // buys the edge back with a host-side wait before every cross-backend KERNEL
+    // submission; this is what proves it stays bought.
     context ctx{slabkit_test::all_devices()};
     queue   q{ctx};
     if (ctx.backends().size() < 2) return;
@@ -237,17 +248,19 @@ TEST_CASE("the stream's order holds ACROSS backends", "[queue]") {
     REQUIRE(src != nullptr);
     REQUIRE(dst != nullptr);
 
-    for (int round = 0; round < 8; ++round) {
-        const int mark = 0xA0 + round;
+    for (int round = 0; round < 40; ++round) {
+        const unsigned mark     = 0xA0u + static_cast<unsigned>(round);
+        const int      spins    = 200000;
+        const int      expected = static_cast<int>(churn(mark, spins));
         std::vector<std::byte> stage(64, std::byte{0});
 
         // A slow producer on the first backend, so the item after it is
         // genuinely still pending when the next backend is submitted to.
         auto* p = static_cast<int*>(src);
         q.parallel_for(first, sycl::range<1>{16}, [=](sycl::id<1> i) {
-            int acc = mark;
-            for (int spin = 0; spin < 200000; ++spin) acc = acc + 0;
-            p[i[0]] = acc;
+            unsigned acc = mark;
+            for (int spin = 0; spin < spins; ++spin) acc = acc * 1103515245u + 12345u;
+            p[i[0]] = static_cast<int>(acc);
         });
 
         q.submit(first, [&](sycl::handler& h) { h.memcpy(stage.data(), src, 64); });
@@ -258,88 +271,11 @@ TEST_CASE("the stream's order holds ACROSS backends", "[queue]") {
         q.submit(other, [&](sycl::handler& h) { h.memcpy(back.data(), dst, 64); });
         q.wait();
 
-        for (int v : back) REQUIRE(v == mark);
+        for (int v : back) REQUIRE(v == expected);
     }
 
     sycl::free(src, ctx.context_of(first));
     sycl::free(dst, ctx.context_of(other));
-}
-
-TEST_CASE("host work runs off the caller's thread", "[queue]") {
-    Stream s;
-
-    const std::thread::id caller = std::this_thread::get_id();
-    auto                  fut    = s.q.submit_host([caller] { return std::this_thread::get_id(); });
-    REQUIRE(fut.get() != caller);
-}
-
-TEST_CASE("a host task waits on the events it captured", "[queue]") {
-    Stream s;
-
-    int* p = s.alloc(1);
-    s.q.submit([&](sycl::handler& h) { h.memset(p, 0, sizeof(int)); });
-    s.q.wait();
-
-    sycl::event slow = s.q.single_task([=] {
-        // Long enough that a task which did not wait would read the old value.
-        for (int spin = 0; spin < 20000000; ++spin) p[0] = p[0] + 1;
-    });
-
-    queue q = s.q;
-    auto  fut = s.q.submit_host([slow, p, q]() mutable {
-        slow.wait();
-        int host = 0;
-        q.submit([&](sycl::handler& h) { h.memcpy(&host, p, sizeof(int)); });
-        q.wait();
-        return host;
-    });
-
-    REQUIRE(fut.get() == 20000000);
-    s.release(p);
-}
-
-TEST_CASE("a host task may submit to the core queues and wait on what it submitted", "[queue]") {
-    Stream s;
-
-    int* p = s.alloc(1);
-    s.q.submit([&](sycl::handler& h) { h.memset(p, 0, sizeof(int)); });
-    s.q.wait();
-
-    queue q   = s.q;
-    auto  fut = s.q.submit_host([p, q]() mutable {
-        sycl::event e = q.single_task([=] { p[0] = 99; });
-        e.wait();
-
-        int host = 0;
-        q.submit([&](sycl::handler& h) { h.memcpy(&host, p, sizeof(int)); });
-        q.wait();
-        return host;
-    });
-
-    REQUIRE(fut.get() == 99);
-    s.release(p);
-}
-
-TEST_CASE("a host task's exception lives in its future", "[queue]") {
-    Stream s;
-    auto   fut = s.q.submit_host([]() -> int { throw std::runtime_error{"boom"}; });
-    REQUIRE_THROWS_AS(fut.get(), std::runtime_error);
-}
-
-TEST_CASE("wait does not drain the host pool", "[queue]") {
-    Stream s;
-
-    auto fut = s.q.submit_host([] {
-        std::this_thread::sleep_for(std::chrono::milliseconds{150});
-        return 1;
-    });
-
-    const auto before = std::chrono::steady_clock::now();
-    s.q.wait();
-    const auto elapsed = std::chrono::steady_clock::now() - before;
-
-    REQUIRE(elapsed < std::chrono::milliseconds{100});
-    REQUIRE(fut.get() == 1);
 }
 
 TEST_CASE("get_wait_list reports the stream's outstanding work", "[queue]") {
@@ -348,10 +284,11 @@ TEST_CASE("get_wait_list reports the stream's outstanding work", "[queue]") {
     int* p = s.alloc(1);
     s.q.single_task([=] { p[0] = 1; });
 
-    // The union over the internal queues; on an in-order queue AdaptiveCpp
-    // returns at most one event per queue.
+    // The union over the internal queues -- the backend pair and the host lane.
+    // On an in-order queue AdaptiveCpp returns at most one event per queue, and
+    // nothing here has posted host work.
     const auto list = s.q.get_wait_list();
-    REQUIRE(list.size() <= 2);
+    REQUIRE(list.size() <= 3);
 
     s.q.wait();
     s.release(p);

@@ -9,6 +9,7 @@ add_sycl_executable(slabkit_tests
     test_capabilities.cpp
     test_context.cpp
     test_queue.cpp
+    test_host_work.cpp
     test_kinds.cpp
     test_mirrors.cpp
     test_allocator.cpp

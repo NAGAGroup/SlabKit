@@ -96,15 +96,12 @@ void AllocRoute::raw_deallocate(void* p, std::size_t bytes) noexcept {
 
         const sycl::context ctx = q_.get_context().context_of(*dev_);
 
-        // A NON-owning reference to the stream. A strong one would mean the
-        // last handle to the stream is routinely dropped by a pool thread from
-        // inside this task, leaving nothing on the owner's thread able to wait
-        // for teardown -- which is a segfault at process exit, measured. The
-        // stream's own destructor drains the pool, so this task always runs
-        // while the stream is either alive or already finished.
-        auto ws = weak_state(q_);
-        q_.submit_host([ws, p, bytes, ctx, pool_impl]() mutable {
-            wait_if_alive(ws);
+        // ONE HOST ITEM, and no wait inside it. The interlock already orders it
+        // after the kernel work outstanding when deallocate was called, which is
+        // the whole of what "deferred" has to mean. It captures no slabkit queue
+        // on purpose: a task holding the last handle would have the stream's
+        // destructor drain the lane the task is running on.
+        q_.submit_host([p, bytes, ctx, pool_impl]() mutable {
             if (pool_impl && pool_impl->owns(p)) {
                 const std::size_t nodes =
                     align_up(bytes, pool_impl->node_size()) / pool_impl->node_size();
