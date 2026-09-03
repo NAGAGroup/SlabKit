@@ -4,12 +4,17 @@
 // naga/slabkit/handles.hpp — the one handle type and its three deleters
 // =============================================================================
 //
-// Every allocation slabkit hands out is owned by the same handle type. What
-// differs is how the memory is released, and that is the deleter's whole job:
+// Every allocation slabkit hands out -- device, shared or host kind, from the
+// runtime, an arena or a pool -- is owned by the same handle type. What differs
+// is how the memory is released, and that is the deleter's whole job:
 //
 //   OsFree     the memory came from the SYCL runtime  -> sycl::free(p, ctx)
 //   PoolFree   the memory came from a DevicePool      -> impl->release(p, nodes)
 //   ArenaFree  the memory came from a DeviceArena     -> nothing to do
+//
+// The kind is NOT part of the handle. sycl::free releases all three kinds
+// through the context, so nothing about release depends on which one it was;
+// context::get_pointer_type is how a kind is learned when it is needed.
 //
 // OsFree is the only one that frees memory; the other two account for it. The
 // pool and arena deleters each hold a share of the memory object's
@@ -23,9 +28,6 @@
 //
 // The deleter NEVER runs a destructor. Objects made by the make_* family are
 // required to be trivially destructible, so there is nothing to run.
-//
-// DeviceDeleter::operator() is declared here and compiled into the library,
-// so a consumer never sees the pool and arena implementations it needs.
 
 #include <cstddef>
 #include <memory>
@@ -60,17 +62,17 @@ struct ArenaFree {
 };
 
 /// The deleter holds exactly what release needs, and nothing else.
-struct DeviceDeleter {
+struct UsmDeleter {
     std::variant<OsFree, PoolFree, ArenaFree> how;
 
-    void operator()(void* p) const noexcept;  // defined in detail/deleter_impl.hpp
+    void operator()(void* p) const noexcept;  // compiled into the library
 };
 
 template <class T>
-using unique_device_ptr = std::unique_ptr<T, DeviceDeleter>;
+using unique_usm_ptr = std::unique_ptr<T, UsmDeleter>;
 
 /// shared_ptr erases the deleter, so no slabkit-specific type appears here.
 template <class T>
-using shared_device_ptr = std::shared_ptr<T>;
+using shared_usm_ptr = std::shared_ptr<T>;
 
 }  // namespace naga::slabkit

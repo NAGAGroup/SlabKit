@@ -1,218 +1,61 @@
 #pragma once
 
 // =============================================================================
-// naga/slabkit/make_shared.hpp — OBJECTS: make_shared_device
+// naga/slabkit/make_shared.hpp — OBJECTS: make_shared_{device,shared,host}
 // =============================================================================
 //
-// The identical six forms over the identical four placements, returning
-// shared_device_ptr. Every one of them is make_unique_device followed by the
+// The identical forms over the identical placements, returning shared_usm_ptr.
+// Every one of them is the make_unique_* of the same kind followed by the
 // std::shared_ptr conversion, which adopts the deleter and erases its type --
 // so the mechanism, the type gate and the blocking behaviour are exactly those
 // documented in make.hpp, with no second implementation to keep in step.
+//
+// Note the two senses of "shared" that meet here: make_SHARED_shared is a
+// shared_ptr to shared-KIND memory. Both spellings are borrowed (std's and
+// SYCL's) and neither is slabkit's to rename.
 
-#include <cstddef>
 #include <memory>
-#include <span>
-#include <type_traits>
 #include <utility>
 
-#include <sycl/sycl.hpp>
-
-#include "naga/slabkit/arena.hpp"
 #include "naga/slabkit/handles.hpp"
 #include "naga/slabkit/make.hpp"
-#include "naga/slabkit/pool.hpp"
 
 namespace naga::slabkit {
 
-// -----------------------------------------------------------------------------
-// Single object
-// -----------------------------------------------------------------------------
-
-template <class T, class... Args>
-    requires(!std::is_array_v<T> && detail::device_object<T> &&
-             !detail::starts_with_placement<Args...>)
-shared_device_ptr<T> make_shared_device(sycl::queue q, Args&&... args) {
-    return shared_device_ptr<T>{make_unique_device<T>(std::move(q), std::forward<Args>(args)...)};
+template <class T, class... A>
+    requires detail::makeable<T>
+shared_usm_ptr<T> make_shared_device(A&&... a) {
+    return shared_usm_ptr<T>{make_unique_device<T>(std::forward<A>(a)...)};
 }
 
-template <class T, class... Args>
-    requires(!std::is_array_v<T> && detail::device_object<T>)
-shared_device_ptr<T> make_shared_device(sycl::queue q, const sycl::device& dev,
-                                        const sycl::context& ctx, Args&&... args) {
-    return shared_device_ptr<T>{
-        make_unique_device<T>(std::move(q), dev, ctx, std::forward<Args>(args)...)};
+template <class T, class... A>
+    requires detail::makeable<T>
+shared_usm_ptr<T> make_shared_shared(A&&... a) {
+    return shared_usm_ptr<T>{make_unique_shared<T>(std::forward<A>(a)...)};
 }
 
-template <class T, class... Args>
-    requires(!std::is_array_v<T> && detail::device_object<T>)
-shared_device_ptr<T> make_shared_device(sycl::queue q, DeviceArena& arena, Args&&... args) {
-    return shared_device_ptr<T>{
-        make_unique_device<T>(std::move(q), arena, std::forward<Args>(args)...)};
+template <class T, class... A>
+    requires detail::makeable<T> && detail::placement_kind_ok<kind::host, A...>
+shared_usm_ptr<T> make_shared_host(A&&... a) {
+    return shared_usm_ptr<T>{make_unique_host<T>(std::forward<A>(a)...)};
 }
 
-template <class T, class... Args>
-    requires(!std::is_array_v<T> && detail::device_object<T>)
-shared_device_ptr<T> make_shared_device(sycl::queue q, DevicePool& pool, Args&&... args) {
-    return shared_device_ptr<T>{
-        make_unique_device<T>(std::move(q), pool, std::forward<Args>(args)...)};
+template <class T, class... A>
+    requires detail::makeable<T>
+shared_usm_ptr<T> make_shared_device_for_overwrite(A&&... a) {
+    return shared_usm_ptr<T>{make_unique_device_for_overwrite<T>(std::forward<A>(a)...)};
 }
 
-// -----------------------------------------------------------------------------
-// Single object, storage only
-// -----------------------------------------------------------------------------
-
-template <class T>
-    requires(!std::is_array_v<T> && detail::device_object<T>)
-shared_device_ptr<T> make_shared_device_for_overwrite(sycl::queue q) {
-    return shared_device_ptr<T>{make_unique_device_for_overwrite<T>(std::move(q))};
+template <class T, class... A>
+    requires detail::makeable<T>
+shared_usm_ptr<T> make_shared_shared_for_overwrite(A&&... a) {
+    return shared_usm_ptr<T>{make_unique_shared_for_overwrite<T>(std::forward<A>(a)...)};
 }
 
-template <class T>
-    requires(!std::is_array_v<T> && detail::device_object<T>)
-shared_device_ptr<T> make_shared_device_for_overwrite(sycl::queue q, const sycl::device& dev,
-                                                      const sycl::context& ctx) {
-    return shared_device_ptr<T>{make_unique_device_for_overwrite<T>(std::move(q), dev, ctx)};
-}
-
-template <class T>
-    requires(!std::is_array_v<T> && detail::device_object<T>)
-shared_device_ptr<T> make_shared_device_for_overwrite(sycl::queue q, DeviceArena& arena) {
-    return shared_device_ptr<T>{make_unique_device_for_overwrite<T>(std::move(q), arena)};
-}
-
-template <class T>
-    requires(!std::is_array_v<T> && detail::device_object<T>)
-shared_device_ptr<T> make_shared_device_for_overwrite(sycl::queue q, DevicePool& pool) {
-    return shared_device_ptr<T>{make_unique_device_for_overwrite<T>(std::move(q), pool)};
-}
-
-// -----------------------------------------------------------------------------
-// Array, value-initialized
-// -----------------------------------------------------------------------------
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, std::size_t n) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), n)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, const sycl::device& dev,
-                                           const sycl::context& ctx, std::size_t n) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), dev, ctx, n)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, DeviceArena& arena, std::size_t n) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), arena, n)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, DevicePool& pool, std::size_t n) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), pool, n)};
-}
-
-// -----------------------------------------------------------------------------
-// Array, storage only
-// -----------------------------------------------------------------------------
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device_for_overwrite(sycl::queue q, std::size_t n) {
-    return shared_device_ptr<TArr>{make_unique_device_for_overwrite<TArr>(std::move(q), n)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device_for_overwrite(sycl::queue q, const sycl::device& dev,
-                                                         const sycl::context& ctx,
-                                                         std::size_t          n) {
-    return shared_device_ptr<TArr>{
-        make_unique_device_for_overwrite<TArr>(std::move(q), dev, ctx, n)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device_for_overwrite(sycl::queue q, DeviceArena& arena,
-                                                         std::size_t n) {
-    return shared_device_ptr<TArr>{make_unique_device_for_overwrite<TArr>(std::move(q), arena, n)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device_for_overwrite(sycl::queue q, DevicePool& pool,
-                                                         std::size_t n) {
-    return shared_device_ptr<TArr>{make_unique_device_for_overwrite<TArr>(std::move(q), pool, n)};
-}
-
-// -----------------------------------------------------------------------------
-// Array, filled with a value
-// -----------------------------------------------------------------------------
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, std::size_t n,
-                                           const detail::elem_t<TArr>& value) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), n, value)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, const sycl::device& dev,
-                                           const sycl::context& ctx, std::size_t n,
-                                           const detail::elem_t<TArr>& value) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), dev, ctx, n, value)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, DeviceArena& arena, std::size_t n,
-                                           const detail::elem_t<TArr>& value) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), arena, n, value)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, DevicePool& pool, std::size_t n,
-                                           const detail::elem_t<TArr>& value) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), pool, n, value)};
-}
-
-// -----------------------------------------------------------------------------
-// Array, copied from host data
-// -----------------------------------------------------------------------------
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue                           q,
-                                           std::span<const detail::elem_t<TArr>> src) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), src)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, const sycl::device& dev,
-                                           const sycl::context&                  ctx,
-                                           std::span<const detail::elem_t<TArr>> src) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), dev, ctx, src)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, DeviceArena& arena,
-                                           std::span<const detail::elem_t<TArr>> src) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), arena, src)};
-}
-
-template <class TArr>
-    requires(std::is_unbounded_array_v<TArr> && detail::device_element<detail::elem_t<TArr>>)
-shared_device_ptr<TArr> make_shared_device(sycl::queue q, DevicePool& pool,
-                                           std::span<const detail::elem_t<TArr>> src) {
-    return shared_device_ptr<TArr>{make_unique_device<TArr>(std::move(q), pool, src)};
+template <class T, class... A>
+    requires detail::makeable<T> && detail::placement_kind_ok<kind::host, A...>
+shared_usm_ptr<T> make_shared_host_for_overwrite(A&&... a) {
+    return shared_usm_ptr<T>{make_unique_host_for_overwrite<T>(std::forward<A>(a)...)};
 }
 
 }  // namespace naga::slabkit

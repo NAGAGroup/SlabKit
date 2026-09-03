@@ -2,24 +2,36 @@
 
 // Shared test scaffolding.
 //
-// Every fixture follows the contract's construction order: the device's
-// context is created FIRST and the queue is constructed from it, so the
-// context a queue reports is the same object the tests pass to the
-// device+context forms.
+// The fixture is a slabkit context over the default device and one stream on
+// it. The sycl objects beside them are the SAME objects: `ctx` is the backend
+// default context the slabkit context retrieved, not a second one, so the
+// interop placements in these tests name exactly the memory the primary ones
+// do. Constructing a sycl::context here would be the one mistake slabkit
+// exists to make unwritable.
 
 #include <cstddef>
 #include <vector>
 
 #include <sycl/sycl.hpp>
 
+#include "naga/slabkit/context.hpp"
+#include "naga/slabkit/queue.hpp"
+
 namespace slabkit_test {
 
 struct Fixture {
-    sycl::device  dev;
-    sycl::context ctx;
-    sycl::queue   q;
+    naga::slabkit::context sctx;
+    naga::slabkit::queue   q;
+    sycl::device           dev;
+    sycl::context          ctx;
+    sycl::queue            sq;
 
-    Fixture() : dev{sycl::default_selector_v}, ctx{dev}, q{ctx, dev} {}
+    Fixture()
+        : sctx{sycl::device{sycl::default_selector_v}}
+        , q{sctx}
+        , dev{sctx.devices().front()}
+        , ctx{sctx.context_of(dev)}
+        , sq{ctx, dev} {}
 };
 
 /// Every device the runtime enumerates, across all platforms.
@@ -42,14 +54,37 @@ inline bool second_device(const sycl::device& dev, sycl::device& out) {
 }
 
 template <class T>
+std::vector<T> read_back(naga::slabkit::queue q, const T* p, std::size_t n) {
+    std::vector<T> host(n);
+    if (n > 0) {
+        q.submit([&](sycl::handler& h) { h.memcpy(host.data(), p, n * sizeof(T)); });
+        q.wait();
+    }
+    return host;
+}
+
+/// Reading from a device other than the stream's default one: the copy has to
+/// be placed there, so it runs on that device's backend queue and its context.
+template <class T>
+std::vector<T> read_back(naga::slabkit::queue q, const sycl::device& dev, const T* p,
+                         std::size_t n) {
+    std::vector<T> host(n);
+    if (n > 0) {
+        q.submit(dev, [&](sycl::handler& h) { h.memcpy(host.data(), p, n * sizeof(T)); });
+        q.wait();
+    }
+    return host;
+}
+
+template <class T>
 std::vector<T> read_back(sycl::queue q, const T* p, std::size_t n) {
     std::vector<T> host(n);
     if (n > 0) q.memcpy(host.data(), p, n * sizeof(T)).wait();
     return host;
 }
 
-template <class T>
-T read_one(sycl::queue q, const T* p) {
+template <class Q, class T>
+T read_one(Q q, const T* p) {
     return read_back(q, p, 1).front();
 }
 

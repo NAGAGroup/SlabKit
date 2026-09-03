@@ -11,7 +11,7 @@
 
 namespace naga::slabkit {
 
-void DeviceDeleter::operator()(void* p) const noexcept {
+void UsmDeleter::operator()(void* p) const noexcept {
     if (p == nullptr) return;
     std::visit(
         [p](const auto& route) {

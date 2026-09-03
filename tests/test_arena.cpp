@@ -18,7 +18,7 @@ using slabkit_test::Fixture;
 
 TEST_CASE("a fresh arena is empty and reports its capacity") {
     Fixture     f;
-    DeviceArena arena{f.q, 4096};
+    DeviceArena arena{f.q, kind::device, 4096};
 
     REQUIRE(arena.capacity() == 4096);
     REQUIRE(arena.used() == 0);
@@ -29,7 +29,7 @@ TEST_CASE("a fresh arena is empty and reports its capacity") {
 
 TEST_CASE("the device+context constructor names the same memory") {
     Fixture     f;
-    DeviceArena arena{f.dev, f.ctx, 2048};
+    DeviceArena arena{f.dev, f.ctx, kind::device, 2048};
 
     REQUIRE(arena.capacity() == 2048);
     REQUIRE(arena.device() == f.dev);
@@ -38,7 +38,7 @@ TEST_CASE("the device+context constructor names the same memory") {
 
 TEST_CASE("allocation advances the bump") {
     Fixture     f;
-    DeviceArena arena{f.q, 4096};
+    DeviceArena arena{f.q, kind::device, 4096};
 
     auto a = sk::malloc_device<std::byte>(100, arena);
     REQUIRE(a);
@@ -53,7 +53,7 @@ TEST_CASE("allocation advances the bump") {
 
 TEST_CASE("an arena honors any alignment, and charges the padding") {
     Fixture     f;
-    DeviceArena arena{f.q, 65536};
+    DeviceArena arena{f.q, kind::device, 65536};
 
     // Push the bump off any convenient boundary first.
     auto skew = sk::malloc_device<std::byte>(1, arena);
@@ -72,7 +72,7 @@ TEST_CASE("an arena honors any alignment, and charges the padding") {
 
 TEST_CASE("an arena that cannot satisfy a request returns null") {
     Fixture     f;
-    DeviceArena arena{f.q, 1024};
+    DeviceArena arena{f.q, kind::device, 1024};
 
     auto ok = sk::malloc_device<std::byte>(512, arena);
     REQUIRE(ok);
@@ -89,7 +89,7 @@ TEST_CASE("an arena that cannot satisfy a request returns null") {
 
 TEST_CASE("an exhausted arena keeps returning null") {
     Fixture     f;
-    DeviceArena arena{f.q, 256};
+    DeviceArena arena{f.q, kind::device, 256};
 
     auto all = sk::malloc_device<std::byte>(256, arena);
     REQUIRE(all);
@@ -99,7 +99,7 @@ TEST_CASE("an exhausted arena keeps returning null") {
 
 TEST_CASE("a zero-element request from an arena is null") {
     Fixture     f;
-    DeviceArena arena{f.q, 1024};
+    DeviceArena arena{f.q, kind::device, 1024};
 
     auto h = sk::malloc_device<int>(0, arena);
     REQUIRE_FALSE(h);
@@ -108,7 +108,7 @@ TEST_CASE("a zero-element request from an arena is null") {
 
 TEST_CASE("copies of an arena handle are the same arena") {
     Fixture     f;
-    DeviceArena arena{f.q, 4096};
+    DeviceArena arena{f.q, kind::device, 4096};
     DeviceArena copy = arena;
 
     auto h = sk::malloc_device<std::byte>(128, copy);
@@ -119,7 +119,7 @@ TEST_CASE("copies of an arena handle are the same arena") {
 
 TEST_CASE("allocations from an arena are usable from a kernel") {
     Fixture     f;
-    DeviceArena arena{f.q, 4096};
+    DeviceArena arena{f.q, kind::device, 4096};
 
     auto h = sk::malloc_device<int>(64, arena);
     REQUIRE(h);
@@ -134,7 +134,7 @@ TEST_CASE("allocations from an arena are usable from a kernel") {
 
 TEST_CASE("the bump survives concurrent allocation") {
     Fixture     f;
-    DeviceArena arena{f.q, 1 << 20};
+    DeviceArena arena{f.q, kind::device, 1 << 20};
 
     constexpr int kThreads = 8;
     constexpr int kEach    = 64;

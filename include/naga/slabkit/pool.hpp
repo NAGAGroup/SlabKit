@@ -9,6 +9,9 @@
 // asserted. Same handle model as DeviceArena -- copyable, copies share the
 // slab, allocations pin it -- and, like the arena, it exposes no allocation
 // method of its own.
+//
+// The KIND is fixed at construction, as it is for an arena, and the allocation
+// name must match it.
 
 #include <cstddef>
 #include <memory>
@@ -16,9 +19,11 @@
 #include <sycl/sycl.hpp>
 
 #include "naga/slabkit/handles.hpp"
+#include "naga/slabkit/kinds.hpp"
 
 namespace naga::slabkit {
 
+class queue;
 class DevicePool;
 
 namespace detail {
@@ -27,14 +32,23 @@ struct PoolAccess;
 
 class DevicePool {
 public:
-    /// \throws std::invalid_argument if node_size is not a power of two.
-    DevicePool(const sycl::queue& q, std::size_t bytes, std::size_t node_size = 1024,
-               const sycl::property_list& props = {});
-
-    /// \throws std::invalid_argument if node_size is not a power of two.
-    DevicePool(const sycl::device& dev, const sycl::context& ctx, std::size_t bytes,
+    /// PRIMARY. \throws std::invalid_argument if node_size is not a power of two.
+    DevicePool(const queue& q, const sycl::device& dev, kind k, std::size_t bytes,
                std::size_t node_size = 1024, const sycl::property_list& props = {});
 
+    /// The stream's default device.
+    DevicePool(const queue& q, kind k, std::size_t bytes, std::size_t node_size = 1024,
+               const sycl::property_list& props = {});
+
+    /// Interop: SYCL's own queue.
+    DevicePool(const sycl::queue& q, kind k, std::size_t bytes, std::size_t node_size = 1024,
+               const sycl::property_list& props = {});
+
+    /// Interop: that device, freed with that context.
+    DevicePool(const sycl::device& dev, const sycl::context& ctx, kind k, std::size_t bytes,
+               std::size_t node_size = 1024, const sycl::property_list& props = {});
+
+    kind        get_kind() const;
     std::size_t node_size() const;
     std::size_t slot_count() const;
     std::size_t free_count() const;

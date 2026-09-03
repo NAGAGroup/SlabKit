@@ -25,16 +25,18 @@
 
 #include "detail/os_alloc.hpp"
 #include "naga/slabkit/handles.hpp"
+#include "naga/slabkit/kinds.hpp"
 
 namespace naga::slabkit::detail {
 
 class ArenaImpl {
 public:
-    ArenaImpl(const sycl::device& dev, const sycl::context& ctx, std::size_t bytes,
+    ArenaImpl(const sycl::device& dev, const sycl::context& ctx, kind k, std::size_t bytes,
               const sycl::property_list& props)
         : dev_{dev}
         , ctx_{ctx}
-        , slab_{os_allocate(0, bytes, dev, ctx, props)}
+        , kind_{k}
+        , slab_{os_allocate(k, 0, bytes, dev, ctx, props)}
         , capacity_{slab_ ? bytes : 0}
         , offset_{0} {}
 
@@ -68,6 +70,7 @@ public:
         }
     }
 
+    kind        get_kind() const noexcept { return kind_; }
     std::size_t capacity() const noexcept { return capacity_; }
     std::size_t used() const noexcept { return offset_.load(std::memory_order_relaxed); }
     std::size_t remaining() const noexcept { return capacity_ - used(); }
@@ -76,11 +79,12 @@ public:
     const sycl::context& context() const noexcept { return ctx_; }
 
 private:
-    sycl::device                   dev_;
-    sycl::context                  ctx_;
-    unique_device_ptr<std::byte[]> slab_;
-    std::size_t                    capacity_;
-    std::atomic<std::size_t>       offset_;
+    sycl::device                dev_;
+    sycl::context               ctx_;
+    kind                        kind_;
+    unique_usm_ptr<std::byte[]> slab_;
+    std::size_t                 capacity_;
+    std::atomic<std::size_t>    offset_;
 };
 
 }  // namespace naga::slabkit::detail

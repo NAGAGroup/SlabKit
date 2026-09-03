@@ -24,16 +24,16 @@ struct Plain {
 }  // namespace
 
 TEST_CASE("a shared handle is a plain shared_ptr") {
-    STATIC_REQUIRE(std::is_same_v<shared_device_ptr<int>, std::shared_ptr<int>>);
-    STATIC_REQUIRE(std::is_same_v<shared_device_ptr<int[]>, std::shared_ptr<int[]>>);
+    STATIC_REQUIRE(std::is_same_v<shared_usm_ptr<int>, std::shared_ptr<int>>);
+    STATIC_REQUIRE(std::is_same_v<shared_usm_ptr<int[]>, std::shared_ptr<int[]>>);
 }
 
 TEST_CASE("shared single-object forms work on every placement") {
     Fixture     f;
-    DeviceArena arena{f.q, 65536};
-    DevicePool  pool{f.q, 65536, 256};
+    DeviceArena arena{f.q, kind::device, 65536};
+    DevicePool  pool{f.q, kind::device, 65536, 256};
 
-    auto check = [&](shared_device_ptr<Plain> h) {
+    auto check = [&](shared_usm_ptr<Plain> h) {
         REQUIRE(h);
         const Plain got = slabkit_test::read_one(f.q, h.get());
         REQUIRE(got.a == 1);
@@ -41,29 +41,29 @@ TEST_CASE("shared single-object forms work on every placement") {
     };
 
     check(make_shared_device<Plain>(f.q, Plain{1, 2}));
-    check(make_shared_device<Plain>(f.q, f.dev, f.ctx, Plain{1, 2}));
+    check(make_shared_device<Plain>(f.q, f.dev, Plain{1, 2}));
     check(make_shared_device<Plain>(f.q, arena, Plain{1, 2}));
     check(make_shared_device<Plain>(f.q, pool, Plain{1, 2}));
 
     REQUIRE(make_shared_device_for_overwrite<Plain>(f.q));
-    REQUIRE(make_shared_device_for_overwrite<Plain>(f.q, f.dev, f.ctx));
+    REQUIRE(make_shared_device_for_overwrite<Plain>(f.q, f.dev));
     REQUIRE(make_shared_device_for_overwrite<Plain>(f.q, arena));
     REQUIRE(make_shared_device_for_overwrite<Plain>(f.q, pool));
 }
 
 TEST_CASE("shared array forms work on every placement") {
     Fixture     f;
-    DeviceArena arena{f.q, 65536};
-    DevicePool  pool{f.q, 65536, 256};
+    DeviceArena arena{f.q, kind::device, 65536};
+    DevicePool  pool{f.q, kind::device, 65536, 256};
 
-    auto check = [&](shared_device_ptr<int[]> h) {
+    auto check = [&](shared_usm_ptr<int[]> h) {
         REQUIRE(h);
         const auto host = slabkit_test::read_back(f.q, h.get(), 16);
         for (std::size_t i = 0; i < 16; ++i) REQUIRE(host[i] == 4);
     };
 
     check(make_shared_device<int[]>(f.q, 16, 4));
-    check(make_shared_device<int[]>(f.q, f.dev, f.ctx, 16, 4));
+    check(make_shared_device<int[]>(f.q, f.dev, 16, 4));
     check(make_shared_device<int[]>(f.q, arena, 16, 4));
     check(make_shared_device<int[]>(f.q, pool, 16, 4));
 
@@ -82,7 +82,7 @@ TEST_CASE("shared array forms work on every placement") {
 
 TEST_CASE("a shared handle returns its nodes when the last owner drops") {
     Fixture    f;
-    DevicePool pool{f.q, 4096, 256};
+    DevicePool pool{f.q, kind::device, 4096, 256};
 
     {
         auto a = make_shared_device<std::byte[]>(f.q, pool, 256);
@@ -98,9 +98,9 @@ TEST_CASE("a shared handle returns its nodes when the last owner drops") {
 
 TEST_CASE("a shared allocation outlives its arena") {
     Fixture                  f;
-    shared_device_ptr<int[]> h;
+    shared_usm_ptr<int[]> h;
     {
-        DeviceArena arena{f.q, 4096};
+        DeviceArena arena{f.q, kind::device, 4096};
         h = make_shared_device<int[]>(f.q, arena, 8, 5);
     }
     const auto host = slabkit_test::read_back(f.q, h.get(), 8);

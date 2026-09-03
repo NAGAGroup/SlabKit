@@ -145,10 +145,10 @@ TEST_CASE("for_overwrite gives storage and nothing else") {
 
 TEST_CASE("single-object forms accept every placement") {
     Fixture     f;
-    DeviceArena arena{f.q, 65536};
-    DevicePool  pool{f.q, 65536, 256};
+    DeviceArena arena{f.q, kind::device, 65536};
+    DevicePool  pool{f.q, kind::device, 65536, 256};
 
-    auto check = [&](unique_device_ptr<Plain> h) {
+    auto check = [&](unique_usm_ptr<Plain> h) {
         REQUIRE(h);
         const Plain got = slabkit_test::read_one(f.q, h.get());
         REQUIRE(got.a == 5);
@@ -156,11 +156,11 @@ TEST_CASE("single-object forms accept every placement") {
     };
 
     check(make_unique_device<Plain>(f.q, Plain{5, 6}));
-    check(make_unique_device<Plain>(f.q, f.dev, f.ctx, Plain{5, 6}));
+    check(make_unique_device<Plain>(f.q, f.dev, Plain{5, 6}));
     check(make_unique_device<Plain>(f.q, arena, Plain{5, 6}));
     check(make_unique_device<Plain>(f.q, pool, Plain{5, 6}));
 
-    REQUIRE(make_unique_device_for_overwrite<Plain>(f.q, f.dev, f.ctx));
+    REQUIRE(make_unique_device_for_overwrite<Plain>(f.q, f.dev));
     REQUIRE(make_unique_device_for_overwrite<Plain>(f.q, arena));
     REQUIRE(make_unique_device_for_overwrite<Plain>(f.q, pool));
 }
@@ -223,17 +223,17 @@ TEST_CASE("array for_overwrite gives storage and nothing else") {
 
 TEST_CASE("array forms accept every placement") {
     Fixture     f;
-    DeviceArena arena{f.q, 65536};
-    DevicePool  pool{f.q, 65536, 256};
+    DeviceArena arena{f.q, kind::device, 65536};
+    DevicePool  pool{f.q, kind::device, 65536, 256};
 
-    auto check = [&](unique_device_ptr<int[]> h) {
+    auto check = [&](unique_usm_ptr<int[]> h) {
         REQUIRE(h);
         const auto host = slabkit_test::read_back(f.q, h.get(), 16);
         for (std::size_t i = 0; i < 16; ++i) REQUIRE(host[i] == 9);
     };
 
     check(make_unique_device<int[]>(f.q, 16, 9));
-    check(make_unique_device<int[]>(f.q, f.dev, f.ctx, 16, 9));
+    check(make_unique_device<int[]>(f.q, f.dev, 16, 9));
     check(make_unique_device<int[]>(f.q, arena, 16, 9));
     check(make_unique_device<int[]>(f.q, pool, 16, 9));
 
@@ -251,15 +251,15 @@ TEST_CASE("array forms accept every placement") {
 
 TEST_CASE("cospan's entry-storage shape works") {
     Fixture     f;
-    DeviceArena arena{f.q, 65536};
+    DeviceArena arena{f.q, kind::device, 65536};
 
     // The exact expression the consumer builds an entry from.
-    unique_device_ptr<std::byte[]> storage =
+    unique_usm_ptr<std::byte[]> storage =
         make_unique_device_for_overwrite<std::byte[]>(f.q, arena, 4096);
     REQUIRE(storage);
 
     // And the dynamic chain's fallback shape: same handle type, different route.
-    unique_device_ptr<std::byte[]> fallback = sk::malloc_device<std::byte>(4096, f.dev, f.ctx);
+    unique_usm_ptr<std::byte[]> fallback = sk::malloc_device<std::byte>(4096, f.dev, f.ctx);
     REQUIRE(fallback);
 
     storage = std::move(fallback);  // interchangeable, as the contract requires
@@ -268,7 +268,7 @@ TEST_CASE("cospan's entry-storage shape works") {
 
 TEST_CASE("make throws when storage cannot be obtained") {
     Fixture     f;
-    DeviceArena tiny{f.q, 64};
+    DeviceArena tiny{f.q, kind::device, 64};
 
     REQUIRE_THROWS_AS(make_unique_device<int[]>(f.q, tiny, 1024), std::bad_alloc);
 }

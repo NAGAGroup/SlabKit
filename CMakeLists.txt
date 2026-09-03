@@ -25,8 +25,7 @@ set(SLABKIT_SOURCES
     src/deleter.cpp
     src/arena.cpp
     src/pool.cpp
-    src/malloc.cpp
-    src/make.cpp
+    src/site.cpp
 )
 
 add_library(naga-slabkit SHARED ${SLABKIT_SOURCES})

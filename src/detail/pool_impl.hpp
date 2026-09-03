@@ -40,6 +40,7 @@
 
 #include "detail/os_alloc.hpp"
 #include "naga/slabkit/handles.hpp"
+#include "naga/slabkit/kinds.hpp"
 
 namespace naga::slabkit::detail {
 
@@ -48,10 +49,11 @@ public:
     static constexpr std::size_t npos = static_cast<std::size_t>(-1);
 
     /// \throws std::invalid_argument if node_size is not a power of two.
-    PoolImpl(const sycl::device& dev, const sycl::context& ctx, std::size_t bytes,
+    PoolImpl(const sycl::device& dev, const sycl::context& ctx, kind k, std::size_t bytes,
              std::size_t node_size, const sycl::property_list& props)
         : dev_{dev}
         , ctx_{ctx}
+        , kind_{k}
         , node_size_{node_size}
         , slot_count_{node_size == 0 ? 0 : bytes / node_size} {
         if (!is_power_of_two(node_size))
@@ -59,7 +61,7 @@ public:
                 "naga::slabkit::DevicePool: node_size must be a power of two"};
 
         // One extra node of slack so the grid can start at an aligned address.
-        slab_ = os_allocate(node_size, bytes + node_size, dev, ctx, props);
+        slab_ = os_allocate(k, node_size, bytes + node_size, dev, ctx, props);
         if (!slab_) {
             slot_count_ = 0;
             return;
@@ -111,6 +113,7 @@ public:
         }
     }
 
+    kind        get_kind() const noexcept { return kind_; }
     std::size_t node_size() const noexcept { return node_size_; }
     std::size_t slot_count() const noexcept { return slot_count_; }
 
@@ -244,13 +247,14 @@ private:
         return npos;
     }
 
-    sycl::device                   dev_;
-    sycl::context                  ctx_;
-    unique_device_ptr<std::byte[]> slab_;
-    std::byte*                     base_       = nullptr;  // node_size-aligned grid origin
-    std::size_t                    node_size_  = 0;
-    std::size_t                    slot_count_ = 0;
-    std::size_t                    free_count_ = 0;
+    sycl::device                dev_;
+    sycl::context               ctx_;
+    kind                        kind_ = kind::device;
+    unique_usm_ptr<std::byte[]> slab_;
+    std::byte*                  base_       = nullptr;  // node_size-aligned grid origin
+    std::size_t                 node_size_  = 0;
+    std::size_t                 slot_count_ = 0;
+    std::size_t                 free_count_ = 0;
 
     std::vector<std::uint64_t> l0_;  // one bit per slot,          1 = free
     std::vector<std::uint64_t> l1_;  // one bit per 64-slot group, 1 = has a free slot
