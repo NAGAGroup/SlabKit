@@ -61,11 +61,41 @@ namespace detail {
 
 class QueueState;
 
+/// An event, and the index of the backend it ran on. The stream has to
+/// remember the backend because a dependency cannot be trusted to cross one.
+using annotated_event = std::pair<sycl::event, std::size_t>;
+
 /// Everything a submission needs, resolved under the state mutex and handed
 /// back before anything is submitted.
+///
+/// `deps` are same-backend and go to depends_on. `host_waits` are the ones from
+/// ANOTHER backend, which are waited on the host BEFORE submitting.
+///
+/// WHY, measured on acpp 2026.09.03 with CUDA and OMP. A cross-backend
+/// depends_on is UNRELIABLE, in a way that depends on the shape of the work:
+///
+///   OMP producer -> OMP memcpy -> CUDA memcpy(depends_on)   20/20 WRONG
+///   the same pair of legs both on OMP                        0/20 wrong
+///   the same, with no dependency at all                     20/20 wrong
+///   OMP kernel -> CUDA memcpy(depends_on), host-USM staging  1/10 wrong
+///   the same, with no dependency at all                      8/10 wrong
+///
+/// So it is honoured sometimes and not others, and a miss is a silently wrong
+/// answer rather than a diagnostic. (The lead measured a third behaviour
+/// independently: a CUDA submit BLOCKING for 427 ms on a long OMP kernel's
+/// event -- correctly ordered, at the price of a host block. Neither of us can
+/// yet say what selects between these.)
+///
+/// What that settles is enough to build on: cross-backend order costs either a
+/// host block or correctness, never nothing. slabkit therefore pays it
+/// explicitly and only at a transition -- and the ordering is then ours, not
+/// the runtime's. Spec 3's "events cross queues and backends, so cross-backend
+/// order costs nothing extra" is false on this toolchain.
 struct submission {
     sycl::queue*             target;
+    std::size_t              backend;
     std::vector<sycl::event> deps;
+    std::vector<sycl::event> host_waits;
 };
 
 std::shared_ptr<QueueState> make_queue_state(context ctx, sycl::async_handler handler,
@@ -75,14 +105,30 @@ std::shared_ptr<QueueState> make_queue_state(context ctx, sycl::async_handler ha
 /// \param concurrent true selects the backend's out-of-order queue (groups).
 submission begin_item(QueueState& st, const sycl::device* dev, bool concurrent);
 
-/// Record `e` as the whole of the current step.
-void end_item(QueueState& st, const sycl::event& e);
+/// The same, for a group member: the deps are the group's, not the stream's.
+submission begin_group_item(QueueState& st, const sycl::device* dev,
+                            const std::vector<annotated_event>& group_deps);
+
+/// Record `e`, run on backend `b`, as the whole of the current step.
+void end_item(QueueState& st, const sycl::event& e, std::size_t b);
 
 /// The deps a group's members share: the step before the group.
-std::vector<sycl::event> begin_group(QueueState& st);
-void                     end_group(QueueState& st, std::vector<sycl::event> events);
+std::vector<annotated_event> begin_group(QueueState& st);
+void                         end_group(QueueState& st, std::vector<annotated_event> events);
 
 void post_host(QueueState& st, std::function<void()> task);
+
+/// A NON-owning reference to a stream, for work that must not be able to hold
+/// the last one. The allocator's deferred release is exactly that case: if it
+/// held a strong handle, the final handle would routinely be dropped by a pool
+/// thread from inside the task, and nothing on the owner's thread could wait
+/// for the stream to finish tearing down.
+std::weak_ptr<QueueState> weak_state(const queue& q);
+
+/// Waits the stream if it is still there. A stream that has gone has already
+/// drained -- its destructor waits for the pool -- so there is nothing to wait
+/// for either way.
+void wait_if_alive(const std::weak_ptr<QueueState>& ws);
 
 const context&      state_context(const QueueState& st);
 const sycl::device& state_device(const QueueState& st);
@@ -103,6 +149,12 @@ public:
 
     const context&      get_context() const { return detail::state_context(*state_); }
     const sycl::device& get_device() const { return detail::state_device(*state_); }
+
+    /// Two handles compare equal when they are the same stream. Containers and
+    /// allocators lean on this: a cross-stream operation is a usage error, and
+    /// this is how it is recognised.
+    friend bool operator==(const queue& a, const queue& b) { return a.state_ == b.state_; }
+    friend bool operator!=(const queue& a, const queue& b) { return !(a == b); }
 
     // -------------------------------------------------------------------------
     // submit
@@ -257,18 +309,29 @@ public:
 
         std::vector<sycl::event> events() const {
             std::lock_guard<std::mutex> lock{mutex_};
-            return events_;
+            std::vector<sycl::event> out;
+            out.reserve(events_.size());
+            for (const auto& [e, b] : events_) out.push_back(e);
+            return out;
         }
 
     private:
         friend class queue;
-        group(detail::QueueState& st, std::vector<sycl::event> deps)
+        group(detail::QueueState& st, std::vector<detail::annotated_event> deps)
             : state_{&st}, deps_{std::move(deps)} {}
+
+        std::vector<detail::annotated_event> annotated_events() const {
+            std::lock_guard<std::mutex> lock{mutex_};
+            return events_;
+        }
 
         template <class CGF>
         sycl::event enqueue(const sycl::device* dev, CGF&& cgf) {
-            detail::submission s = detail::begin_item(*state_, dev, /*concurrent=*/true);
-            s.deps               = deps_;
+            detail::submission s = detail::begin_group_item(*state_, dev, deps_);
+
+            // A dependency from another backend is not honoured by the backend
+            // being submitted to; it is waited here instead.
+            for (auto& e : s.host_waits) e.wait();
 
             sycl::event e = s.target->submit(
                 dev ? sycl::property_list{sycl::property::command_group::AdaptiveCpp_retarget{*dev}}
@@ -279,14 +342,14 @@ public:
                 });
 
             std::lock_guard<std::mutex> lock{mutex_};
-            events_.push_back(e);
+            events_.emplace_back(e, s.backend);
             return e;
         }
 
-        detail::QueueState*      state_;
-        std::vector<sycl::event> deps_;
-        mutable std::mutex       mutex_;
-        std::vector<sycl::event> events_;
+        detail::QueueState*                       state_;
+        std::vector<detail::annotated_event>      deps_;
+        mutable std::mutex                        mutex_;
+        std::vector<detail::annotated_event>      events_;
     };
 
     /// f(group&). Returns the step's events, which the next item will wait on.
@@ -294,8 +357,13 @@ public:
     std::vector<sycl::event> submit_group(F&& f) {
         group g{*state_, detail::begin_group(*state_)};
         f(g);
-        std::vector<sycl::event> events = g.events();
-        detail::end_group(*state_, events);
+
+        std::vector<detail::annotated_event> annotated = g.annotated_events();
+        detail::end_group(*state_, annotated);
+
+        std::vector<sycl::event> events;
+        events.reserve(annotated.size());
+        for (auto& [e, b] : annotated) events.push_back(e);
         return events;
     }
 
@@ -313,6 +381,8 @@ public:
     }
 
 private:
+    friend std::weak_ptr<detail::QueueState> detail::weak_state(const queue& q);
+
     template <class CGF>
     sycl::event enqueue(const sycl::device* dev, const std::vector<sycl::event>* extra, CGF&& cgf) {
         return body(dev, extra, [&](sycl::handler& h) { cgf(h); });
@@ -321,6 +391,11 @@ private:
     template <class Body>
     sycl::event body(const sycl::device* dev, const std::vector<sycl::event>* extra, Body&& fill) {
         detail::submission s = detail::begin_item(*state_, dev, /*concurrent=*/false);
+
+        // Cross-backend edges of the stream's own order are waited here: the
+        // backend being submitted to will not honour them (see `submission`).
+        for (auto& e : s.host_waits) e.wait();
+
         if (extra) s.deps.insert(s.deps.end(), extra->begin(), extra->end());
 
         sycl::event e = s.target->submit(
@@ -331,7 +406,7 @@ private:
                 fill(h);
             });
 
-        detail::end_item(*state_, e);
+        detail::end_item(*state_, e, s.backend);
         return e;
     }
 

@@ -112,6 +112,9 @@ private:
     std::vector<sycl::device> select_list(aspect a) const;
     device_groups             select_groups(aspect a) const;
 
+    /// The index of the backend whose answer for `p` is strongest, or npos.
+    std::size_t strongest_answer(const void* p, kind& out) const;
+
     friend struct detail::ContextAccess;
     std::shared_ptr<const detail::ContextState> state_;
 };

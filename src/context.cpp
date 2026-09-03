@@ -278,27 +278,52 @@ device_groups context::select_groups(aspect a) const {
 // Pointer queries, tried against every backend context held here
 // -----------------------------------------------------------------------------
 
-kind context::get_pointer_type(const void* p) const {
-    for (const auto& ctx : state_->backend_ctx) {
-        const sycl::usm::alloc a = sycl::get_pointer_type(p, ctx);
-        switch (a) {
-            case sycl::usm::alloc::device: return kind::device;
-            case sycl::usm::alloc::shared: return kind::shared;
-            case sycl::usm::alloc::host: return kind::host;
+// A `host` answer is the WEAKEST one a backend can give, and one backend gives
+// it for everything: AdaptiveCpp's OMP allocator answers `host` for any address
+// it is handed, including another backend's device memory (measured -- see
+// test_context). Taking the first backend's answer would therefore have made a
+// CUDA device pointer look like host memory whenever an OMP backend happened to
+// be enumerated first, and the routed mirrors would have chosen a host memcpy
+// over it. So every backend is asked, a device or shared answer wins outright,
+// and `host` is only believed when nothing stronger came back.
+std::size_t context::strongest_answer(const void* p, kind& out) const {
+    std::size_t host_index = detail::ContextState::npos;
+
+    for (std::size_t i = 0; i < state_->backend_ctx.size(); ++i) {
+        switch (sycl::get_pointer_type(p, state_->backend_ctx[i])) {
+            case sycl::usm::alloc::device: out = kind::device; return i;
+            case sycl::usm::alloc::shared: out = kind::shared; return i;
+            case sycl::usm::alloc::host:
+                if (host_index == detail::ContextState::npos) host_index = i;
+                break;
             case sycl::usm::alloc::unknown: break;
         }
     }
-    throw sycl::exception{sycl::make_error_code(sycl::errc::invalid),
-                          "naga::slabkit::context: pointer belongs to no backend context here"};
+
+    if (host_index != detail::ContextState::npos) {
+        out = kind::host;
+        return host_index;
+    }
+    return detail::ContextState::npos;
+}
+
+kind context::get_pointer_type(const void* p) const {
+    kind k{};
+    if (strongest_answer(p, k) == detail::ContextState::npos)
+        throw sycl::exception{
+            sycl::make_error_code(sycl::errc::invalid),
+            "naga::slabkit::context: pointer belongs to no backend context here"};
+    return k;
 }
 
 sycl::device context::get_pointer_device(const void* p) const {
-    for (const auto& ctx : state_->backend_ctx)
-        if (sycl::get_pointer_type(p, ctx) != sycl::usm::alloc::unknown)
-            return sycl::get_pointer_device(p, ctx);
-
-    throw sycl::exception{sycl::make_error_code(sycl::errc::invalid),
-                          "naga::slabkit::context: pointer belongs to no backend context here"};
+    kind              k{};
+    const std::size_t i = strongest_answer(p, k);
+    if (i == detail::ContextState::npos)
+        throw sycl::exception{
+            sycl::make_error_code(sycl::errc::invalid),
+            "naga::slabkit::context: pointer belongs to no backend context here"};
+    return sycl::get_pointer_device(p, state_->backend_ctx[i]);
 }
 
 }  // namespace naga::slabkit

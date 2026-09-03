@@ -217,6 +217,54 @@ TEST_CASE("group members are given the chance to run concurrently", "[queue]") {
     s.release(seen);
 }
 
+TEST_CASE("the stream's order holds ACROSS backends", "[queue]") {
+    // The regression test for the finding that shaped this class: on acpp
+    // 2026.09.03 a depends_on that CROSSES a backend is unreliable -- in this
+    // exact shape (OMP producer, OMP memcpy, CUDA memcpy) it was wrong 20 of 20
+    // times in raw SYCL, silently. The stream buys the edge back with a
+    // host-side wait at the transition; this is what proves it stays bought.
+    context ctx{slabkit_test::all_devices()};
+    queue   q{ctx};
+    if (ctx.backends().size() < 2) return;
+
+    const sycl::device first = ctx.devices().front();
+    sycl::device       other = first;
+    for (const auto& d : ctx.devices())
+        if (!(d.get_platform() == first.get_platform())) other = d;
+
+    void* src = sycl::malloc_device(64, first, ctx.context_of(first));
+    void* dst = sycl::malloc_device(64, other, ctx.context_of(other));
+    REQUIRE(src != nullptr);
+    REQUIRE(dst != nullptr);
+
+    for (int round = 0; round < 8; ++round) {
+        const int mark = 0xA0 + round;
+        std::vector<std::byte> stage(64, std::byte{0});
+
+        // A slow producer on the first backend, so the item after it is
+        // genuinely still pending when the next backend is submitted to.
+        auto* p = static_cast<int*>(src);
+        q.parallel_for(first, sycl::range<1>{16}, [=](sycl::id<1> i) {
+            int acc = mark;
+            for (int spin = 0; spin < 200000; ++spin) acc = acc + 0;
+            p[i[0]] = acc;
+        });
+
+        q.submit(first, [&](sycl::handler& h) { h.memcpy(stage.data(), src, 64); });
+        q.submit(other, [&](sycl::handler& h) { h.memcpy(dst, stage.data(), 64); });
+        q.wait();
+
+        std::vector<int> back(16, 0);
+        q.submit(other, [&](sycl::handler& h) { h.memcpy(back.data(), dst, 64); });
+        q.wait();
+
+        for (int v : back) REQUIRE(v == mark);
+    }
+
+    sycl::free(src, ctx.context_of(first));
+    sycl::free(dst, ctx.context_of(other));
+}
+
 TEST_CASE("host work runs off the caller's thread", "[queue]") {
     Stream s;
 

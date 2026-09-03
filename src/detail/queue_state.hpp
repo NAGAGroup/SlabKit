@@ -38,9 +38,19 @@ namespace naga::slabkit::detail {
 
 /// The host-work pool. Fixed size, FIFO, exceptions land in the caller's future
 /// because every task posted here is a packaged_task.
-class HostPool {
+///
+/// THE POOL OUTLIVES ITS OWNER, ON PURPOSE. A host task holds a copy of the
+/// queue handle -- the deferred release in the allocator does exactly that --
+/// so the last reference to the QueueState is routinely dropped BY A POOL
+/// THREAD, from inside the task it just ran. If the pool were a member destroyed
+/// at that moment, the worker would return from the task into a destroyed
+/// mutex. So each worker holds a share of the pool itself and the threads are
+/// detached: the pool dies with its last worker, after that worker has stopped
+/// touching it. Measured the hard way -- this was a segfault at the end of a
+/// cross-device test, not a theory.
+class HostPool : public std::enable_shared_from_this<HostPool> {
 public:
-    explicit HostPool(std::size_t threads);
+    static std::shared_ptr<HostPool> create(std::size_t threads);
     ~HostPool();
 
     HostPool(const HostPool&)            = delete;
@@ -48,19 +58,31 @@ public:
 
     void post(std::function<void()> task);
 
+    /// Asks the workers to drain the queue and exit. Idempotent.
+    void stop();
+
+    /// Blocks until every worker has exited. Must not be called FROM a worker.
+    void wait_workers();
+
+    bool on_pool_thread() const;
+
 private:
+    HostPool() = default;
     void worker();
 
-    std::vector<std::thread>          threads_;
     std::deque<std::function<void()>> tasks_;
-    std::mutex                        mutex_;
+    std::vector<std::thread::id>      worker_ids_;
+    mutable std::mutex                mutex_;
     std::condition_variable           cv_;
-    bool                              stop_ = false;
+    std::condition_variable           done_cv_;
+    std::size_t                       live_workers_ = 0;
+    bool                              stop_         = false;
 };
 
 class QueueState {
 public:
     QueueState(context ctx, sycl::async_handler handler, std::size_t host_threads);
+    ~QueueState();
 
     struct BackendPair {
         sycl::queue inorder;
@@ -85,9 +107,9 @@ public:
 
     std::mutex                                mutex;
     std::vector<std::unique_ptr<BackendPair>> pairs;
-    std::vector<sycl::event>                  last_step;
+    std::vector<annotated_event>              last_step;
 
-    HostPool pool;
+    std::shared_ptr<HostPool> pool;
 };
 
 }  // namespace naga::slabkit::detail
