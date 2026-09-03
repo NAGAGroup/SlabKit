@@ -1,186 +1,258 @@
 # slabkit
 
-USM device memory with owning handles, for SYCL.
+USM memory for SYCL programs that run on several devices: owning handles, one
+in-order stream of work, and copies that route themselves.
 
-Two families of free functions — **`malloc_*`** for uninitialized storage and
-**`make_*`** for constructed objects — over four kinds of **placement**: a
-queue, a device with its context, an arena, a pool. They all yield one handle
-type, and the handle knows how to release what it holds.
-
-There are no array or view types. Shapes belong to the code that has them.
+Built for AdaptiveCpp's generic compilation flow. It is a compiled shared
+library, not a header-only one.
 
 ```cpp
 #include <naga/slabkit/slabkit.hpp>
 namespace sk = naga::slabkit;
 
-// One context per device, created before the queue that uses it.
-sycl::device  dev{sycl::gpu_selector_v};
-sycl::context ctx{dev};
-sycl::queue   q{ctx, dev};
+sk::context ctx{sycl::device{sycl::gpu_selector_v}};
+sk::queue   q{ctx};
 
-// Storage: SYCL's signatures, returning a handle instead of a raw pointer.
-auto data = sk::malloc_device<float>(1024, q);       // unique_device_ptr<float[]>
-
-// Objects: std::make_unique's forms, constructed on the device.
-auto weights = sk::make_unique_device<float[]>(q, 1024, 0.5f);
-
-float* p = weights.get();
-q.parallel_for(sycl::range<1>{1024}, [=](sycl::id<1> i) { p[i] *= 2.0f; }).wait();
-// Memory is released when the handle goes away.
+auto data = sk::malloc_device<float>(1 << 20, q);   // owning handle
+sk::fill(q, data.get(), 1.0f, 1 << 20);
+q.parallel_for(sycl::range<1>{1 << 20},
+               [p = data.get()](sycl::id<1> i) { p[i[0]] *= 2.0f; });
+q.wait();
 ```
 
-Call the `malloc_*` functions **qualified**. They deliberately mirror SYCL's
-names, so an unqualified call with SYCL arguments is ambiguous between
-`naga::slabkit::malloc_device` and `sycl::malloc_device` — a namespace alias
-like `sk` above is the comfortable way to work.
+## The pieces
 
-## Placement: which form to use
+| | |
+|---|---|
+| `context` | the device set, one `sycl::context` per backend, and the answers to what the machine can do |
+| `queue` | one in-order stream over that context: placement, concurrent groups, a host-work pool |
+| `malloc_*` / `aligned_alloc_*` | uninitialized storage, SYCL's names and signatures |
+| `make_unique_*` / `make_shared_*` | constructed objects, `std::make_unique`'s forms |
+| `DeviceArena` / `DevicePool` | a bump region and a fixed-node free list, each over one slab |
+| `memcpy` / `copy` / `memset` / `fill` | SYCL's four explicit operations, routed across devices and backends |
+| `allocator<T>` | one std-conforming allocator over every kind and route |
+| `usm_vector<T>` | a value-semantic array whose every mutation is enqueued |
 
-**For the device your queue was built for, use the queue forms.** Same device,
-same context, nothing to get wrong.
+Three USM kinds — `device`, `shared`, `host` — over six placements.
+
+## Contexts
+
+A USM allocation belongs to a SYCL context, and any access must use that
+context. A copy between two devices is legal only within one context. Each
+platform has a default context spanning all its devices, and that is the one
+slabkit holds — one per backend, retrieved, never constructed.
 
 ```cpp
-auto a = sk::malloc_device<float>(n, q);
-auto b = sk::make_unique_device<float[]>(q, n, 1.0f);
+sk::context by_device  {my_device};                       // one device
+sk::context by_devices {{dev_a, dev_b}};                  // several
+sk::context by_platform{my_platform};                     // every device of a platform
+sk::context by_need    {{sk::aspect::gpu, sk::aspect::has_shared}};   // choose the support matrix
 ```
 
-**For any other device, use the device+context forms**, naming that device's
-own context.
+The last form is usually the one you want: state the properties your program
+needs and let the machine answer. An unsatisfiable set throws
+`std::invalid_argument` rather than handing back an empty context.
 
 ```cpp
-sycl::context other_ctx{other_dev};        // that device's one context
-auto c = sk::malloc_device<float>(n, other_dev, other_ctx);
-auto d = sk::make_unique_device<float[]>(q, other_dev, other_ctx, n, 1.0f);
+ctx.devices();              // what was selected
+ctx.backends();             // deduplicated, one per platform
+ctx.context_of(dev);        // the backend context — pass this to any SYCL call that wants one
+ctx.get_pointer_type(p);    // kind::device | kind::shared | kind::host
+ctx.get_pointer_device(p);  // which device owns it
 ```
 
-Using the device+context forms for **everything** is legitimate and keeps
-allocation uniform. The single obligation is that the context you pass for a
-queue's own device is the context that queue owns — so construct the context
-first and the queue from it, as the example above does.
+**Never construct a `sycl::context` yourself.** Use `context_of`. A context
+spanning two platforms is illegal, AdaptiveCpp cannot diagnose it, and the
+failure is a crash on free rather than an error.
 
-This matters because `sycl::free` resolves its allocator from the context it is
-given: it takes the context's first device backend and the first device in it.
-A context that spans several devices can therefore release a pointer through
-the wrong allocator. One context per device, held for as long as the device is
-used, makes that impossible.
+## The queue
 
-## Memory objects
-
-`DeviceArena` and `DevicePool` are memory, not allocators. They have no
-allocation methods; they are simply placements the free functions accept.
+One logical in-order stream. Work submitted later observes work submitted
+earlier, on whichever device it ran.
 
 ```cpp
-sk::DeviceArena arena{dev, ctx, 64 << 20};   // bump region
-sk::DevicePool  pool {dev, ctx, 64 << 20, 1024};  // fixed-node free list
+sk::queue q{ctx};                     // optionally: async handler, host-thread count
 
-auto scratch = sk::malloc_device<float>(4096, arena);
-auto node    = sk::malloc_device<float>(256,  pool);
+q.single_task([]{ ... });                        // on the default device
+q.single_task(other_device, []{ ... });          // placed
+q.parallel_for(sycl::range<1>{n}, kernel);       // range, nd_range, offset and reduction forms
+q.submit([](sycl::handler& h) { ... });          // full command group
+q.submit(sycl::property_list{sycl::property::command_group::AdaptiveCpp_retarget{dev}}, cgf);
+
+q.wait();  q.wait_and_throw();  q.throw_asynchronous();
+q.get_wait_list();                    // the events to hand to depends_on
 ```
 
-Both are light handles over a shared implementation: copies refer to the same
-slab, and **an allocation pins the slab it came from**. An allocation may
-safely outlive every handle that named its memory —
+**A group is N submissions that are one step.** They run concurrently; the next
+item waits for all of them.
 
 ```cpp
-sk::unique_device_ptr<float[]> keep;
-{
-    sk::DeviceArena tmp{dev, ctx, 1 << 20};
-    keep = sk::malloc_device<float>(1024, tmp);
-}   // the arena handle is gone; `keep` is still valid
+auto events = q.submit_group([&](sk::queue::group& g) {
+    g.submit(dev_a, [&](sycl::handler& h) { h.parallel_for(range_a, kernel_a); });
+    g.submit(dev_b, [&](sycl::handler& h) { h.parallel_for(range_b, kernel_b); });
+});
 ```
 
-— because the slab is released by the last of {handles to the object,
-allocations from it}. There is no lifetime rule to remember.
-
-**Arena.** A bump: allocation is a pointer advance, it is lock-free, and there
-is no per-allocation free and no rewind. It honors any alignment by aligning
-the address the bump lands on, so padding is charged to the arena and shows up
-in `used()`. Size it with slack if it will serve large alignments.
-
-**Pool.** A fixed-node free list over `node_size` slots — `node_size` must be a
-power of two. One node is O(1); a contiguous run is O(N/64). Allocations are
-node-aligned and rounded up to whole nodes, and asking for an alignment larger
-than the node size is an error. It is mutex-protected, and a double release is
-caught by an assertion in debug builds.
-
-## What you get back, and when it is null
-
-`malloc_*` returns **null**, exactly as `sycl::malloc_*` does, and additionally
-when an arena or pool cannot satisfy the request — exhausted, or too fragmented
-to place a contiguous run. Check the handle.
-
-A **zero-element** request is implementation-defined: slabkit passes it through
-and adds no rule of its own, because SYCL implementations do not agree on it.
-An arena or pool, having no SYCL call to mirror, returns null.
-
-`make_*` throws **`std::bad_alloc`** when storage cannot be obtained, exactly as
-`std::make_unique` does. Usage errors — a pool node size that is not a power of
-two, an alignment a pool cannot honor — are **`std::invalid_argument`**. There
-is no slabkit exception type.
-
-## Objects: the make family
-
-`make_unique_device` and `make_shared_device` offer std's forms: a single
-object, `for_overwrite`, a value-initialized array, a filled array, and a copy
-from host data. The initialization queue comes first and the placement second.
+**Host work runs on a pool, never on your thread.**
 
 ```cpp
-auto one    = sk::make_unique_device<Params>(q, 3, 4.5f);       // constructor args
-auto raw    = sk::make_unique_device_for_overwrite<Params>(q);  // storage only
-auto zeros  = sk::make_unique_device<float[]>(q, n);            // value-initialized
-auto filled = sk::make_unique_device<float[]>(q, n, 1.0f);      // filled
-auto copied = sk::make_unique_device<float[]>(q, std::span<const float>{host});
+std::future<void> done = q.submit_host([events]() mutable {
+    for (auto& e : events) e.wait();     // depend on device work by waiting inside
+    ...                                   // then touch the memory
+});
 ```
 
-**They block.** Initialization is enqueued only because that is how device
-memory is written, and it is waited on before you get the handle — the object
-is ready the instant the call returns. There are no event-returning variants.
+Host tasks never depend on one another — compose two into one if you need
+ordering. A host task may submit to the stream and wait on what it submitted.
+`wait()` does not drain the pool.
 
-**How the object gets there** depends on its type. A trivially copyable type is
-built on the host and copied in. Anything else gets storage and then a single
-kernel that placement-news it *on the device*, so its constructor runs where
-the object lives. That is the point: an object holding a pointer into itself,
-built on the host and copied in, would carry a host address into device memory.
+Every member is safe to call from any thread.
 
-Constructor arguments are copied into that kernel and reach the constructor as
-const lvalues, so they must be device-copyable, and move-only arguments cannot
-be expressed.
+## Allocating
 
-**The type gate.** `T` must be trivially destructible — a handle has no queue
-on which to run a destructor, and never runs one — and **must not be
-polymorphic**. Constructing on the device is exactly what would make a vtable
-device-correct, but AdaptiveCpp's generic (SSCP) flow cannot resolve device
-vtables at all: the call faults on the host backend and can return silently
-wrong results on CUDA. slabkit rejects such types at compile time rather than
-letting you find that out at runtime. Array forms additionally need trivially
-copyable elements, since they initialize by fill or copy.
+Storage keeps SYCL's names, so the kind is in the function name:
 
-## Building and consuming
-
-slabkit is a compiled shared library, and a [pixi](https://pixi.sh) source
-package. From a pixi project:
-
-```toml
-[dependencies]
-slabkit = { git = "https://github.com/NAGAGroup/SlabKit.git", tag = "..." }
+```cpp
+auto d = sk::malloc_device<float>(n, q);            // on q's default device
+auto e = sk::malloc_device<float>(n, q, dev);       // placed
+auto s = sk::malloc_shared<float>(n, q, dev);
+auto h = sk::malloc_host<float>(n, q);              // host kind: no device argument
+auto a = sk::aligned_alloc_device<float>(256, n, q);
 ```
 
-then in CMake:
+Objects keep `std::make_unique`'s forms, block until ready, and throw
+`std::bad_alloc`:
+
+```cpp
+auto one   = sk::make_unique_device<Params>(q, dev, arg1, arg2);
+auto many  = sk::make_unique_device<float[]>(q, n, 1.0f);        // fill
+auto copied= sk::make_unique_shared<float[]>(q, std::span{host_data});
+auto raw   = sk::make_unique_device_for_overwrite<float[]>(q, n);
+auto shared_obj = sk::make_shared_device<Params>(q, args...);
+```
+
+Element types must be trivially destructible and non-polymorphic — AdaptiveCpp's
+generic flow cannot resolve virtual dispatch on a device, and the failure is a
+wrong answer rather than an error, so the type gate rejects it at compile time.
+
+### Arenas and pools
+
+Both take their kind at construction and own one slab. Handles from them keep
+the slab alive; the object itself may go out of scope first.
+
+```cpp
+sk::DeviceArena arena{q, dev, sk::kind::device, 64 << 20};
+auto block = sk::malloc_device<float>(n, arena);    // the name must match the kind
+
+sk::DevicePool pool{q, dev, sk::kind::shared, 64 << 20, /*node_size=*/4096};
+auto node = sk::malloc_shared<std::byte>(4096, pool);
+```
+
+An arena is a budget and never falls back; a pool hands out fixed nodes and its
+allocations are node-size aligned.
+
+## Copying
+
+The four mirrors take the stream and return an event. `memcpy` and `copy` find
+their operands and choose a route: a direct device-to-device copy when the
+devices share a backend, a host-side copy when both allocations are
+host-accessible, and otherwise a staged copy through a host intermediate. A
+plain host pointer is a legal operand.
+
+```cpp
+sk::memcpy(q, dst, src, bytes);
+sk::copy(q, src, dst, count);                 // typed
+sk::copy(q, device_ptr, host_vector.data(), count);
+sk::memset(q, p, 0, bytes);
+sk::fill(q, p, 3.5f, count);
+// each also takes a std::vector<sycl::event> of dependencies
+sk::context::copy_routes(kind_a, dev_a, kind_b, dev_b);   // what routes exist, best first
+```
+
+There is always a route; the staged one is always available and always last.
+
+## Containers
+
+`allocator<T>` is a standard allocator carrying where memory comes from:
+
+```cpp
+sk::allocator<float> on_device{q, sk::kind::device, dev};
+sk::allocator<float> in_pool  {q, pool};
+std::vector<float, sk::allocator<float>> v{sk::allocator<float>{q, sk::kind::shared, dev}};
+```
+
+`std::vector` works over the **shared** and **host** kinds. Over the device kind
+it allocates correctly but element access is a host dereference of device
+memory — use `usm_vector` instead.
+
+`usm_vector<T>` has value semantics and enqueues everything:
+
+```cpp
+sk::usm_vector<float> a{n, 1.0f, on_device};    // enqueued, returns immediately
+sk::usm_vector<float> b{a, on_other_device};    // routed copy across devices or kinds
+b = a;                                           // routed copy
+a.resize(2 * n);                                 // old storage released after the work using it
+a.fill(2.0f);
+a.data();                                        // the pointer kernels take
+
+{ auto acc = a.get_access(); acc[0] = 5.0f; }    // syncs; mutable; shared/host kinds only
+{ auto view = b.host_view(); use(view[0]); }     // syncs; read-only; every kind
+```
+
+Deallocation never happens on your thread: it is posted, and the memory is
+returned after the work using it has finished. So `resize` and destruction
+cannot pull memory out from under a running kernel.
+
+Both containers refuse operations between two different streams; use `copy` on
+`data()` with explicit events for that.
+
+## Two traps
+
+**Call `malloc_*` qualified.** `sycl::malloc_device` exists too, and ADL reaches
+it from any call whose arguments include a `sycl::queue`. Write
+`sk::malloc_device<float>(n, q)`, never `malloc_device<float>(n, q)`.
+
+**Take turns.** Do not touch shared memory from the host while a kernel that
+uses it is running. No device reports support for concurrent access through
+AdaptiveCpp, and on Windows and WSL the NVIDIA driver genuinely does not have
+it — the result is corruption or a fault, not a slowdown. The routed mirrors
+enforce this for you; `get_access()` and `host_view()` synchronize before
+handing you a view, and what you do while holding one is yours to get right.
+
+## What each backend actually does
+
+No query distinguishes these, so they are written down instead. The answers
+slabkit gives for capabilities it cannot query are pinned to the AdaptiveCpp
+version this library is built against.
+
+| backend | notes |
+|---|---|
+| CUDA, Linux | shared memory is managed memory and migrates on page faults; peer access between devices is enabled automatically |
+| CUDA, Windows and WSL | no full managed memory: prefetch is unavailable and concurrent host/device access is unsupported |
+| HIP | shared memory needs XNACK, which is available on limited hardware and often off by default; without it, shared behaves as pinned host memory — correct and slow |
+| Level Zero, discrete Intel | migration is per allocation, not per page: a host touch moves the whole thing, so keep host-touched data out of a large shared arena |
+| Level Zero, integrated Intel | unified memory, page-granular; shared is a good default |
+| Metal | USM is emulated; no `double`, no 64-bit atomics |
+| Vulkan | device allocations only — no shared, no host |
+| OpenMP host | every kind is host memory; `get_pointer_type` answers `host` for any address, including device allocations from other backends |
+
+Cross-backend ordering is not free: the stream waits on the host at a backend
+transition, because dependencies between backends are not reliably honoured by
+the runtime.
+
+## Building
+
+```
+pixi run -e dev-cuda build      # or dev-omp, dev-l0, dev-ocl, dev-amd
+pixi run -e dev-cuda test
+```
+
+Each environment carries the backends it names and constrains the runtime to
+them, so a test run exercises what its name says.
+
+Consuming it:
 
 ```cmake
-find_package(slabkit CONFIG REQUIRED)
-target_link_libraries(your_target PRIVATE naga::slabkit)
+find_package(slabkit REQUIRED)
+target_link_libraries(my_target PRIVATE naga::slabkit)
 ```
-
-From a non-pixi project, `pixi exec pixi-pack --create-executable` produces a
-self-extracting archive; point `CMAKE_PREFIX_PATH` at the unpacked environment
-and use the same `find_package`. The pixi pipeline is the only officially
-supported build and consumption path.
-
-To work on slabkit itself, `pixi run -e dev-omp test` builds and runs the suite
-on the CPU via AdaptiveCpp's OpenMP backend; `-e dev-cuda` runs it on an NVIDIA
-device.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
