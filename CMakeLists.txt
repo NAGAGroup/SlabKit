@@ -18,13 +18,17 @@ find_package(AdaptiveCpp REQUIRED)
 # The pool's free list is mutex-protected.
 find_package(Threads REQUIRED)
 
-add_library(naga-slabkit SHARED
+set(SLABKIT_SOURCES
+    src/capabilities.cpp
+    src/context.cpp
     src/deleter.cpp
     src/arena.cpp
     src/pool.cpp
     src/malloc.cpp
     src/make.cpp
 )
+
+add_library(naga-slabkit SHARED ${SLABKIT_SOURCES})
 add_library(naga::slabkit ALIAS naga-slabkit)
 
 target_include_directories(naga-slabkit
@@ -42,13 +46,7 @@ set_target_properties(naga-slabkit PROPERTIES
     SOVERSION ${PROJECT_VERSION_MAJOR}
 )
 
-add_sycl_to_target(TARGET naga-slabkit SOURCES
-    src/deleter.cpp
-    src/arena.cpp
-    src/pool.cpp
-    src/malloc.cpp
-    src/make.cpp
-)
+add_sycl_to_target(TARGET naga-slabkit SOURCES ${SLABKIT_SOURCES})
 
 option(SLABKIT_BUILD_TESTS "Build Catch2 test suite" OFF)
 
