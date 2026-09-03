@@ -10,8 +10,8 @@ preview = ["pixi-build"]
 # as <stem>_<target_platform> activation packages from the naga-labs channel.
 # Never name an activation package in a dep table; never add *_compiler_version.
 [workspace.build-variants]
-c_compiler = ["acpp-clang"]
-cxx_compiler = ["acpp-clangxx"]
+c_compiler = ["acpp-clang-nightly"]
+cxx_compiler = ["acpp-clangxx-nightly"]
 
 [feature.opencl.dependencies]
 intel-opencl-rt = ">=2025.2.0,<2026"
@@ -74,7 +74,7 @@ ninja = ">=1.12"
 # test one. The runtime arrives via run-export; consumers must NOT write
 # acpp-runtime or acpp-llvm themselves.
 [package.host-dependencies]
-acpp = ">=25.10.0,<25.11.0a0"
+acpp-nightly = "==2026.09.03"
 
 [package.build.config]
 # Tests need Catch2, which the package build does not carry.
@@ -96,12 +96,12 @@ slabkit = { path = "." }
 [feature.dev.dependencies]
 nushell = ">=0.110.0,<0.111"
 catch2 = ">=3.8"
-acpp = ">=25.10.0,<25.11.0a0"
-acpp-tools = ">=25.10.0,<25.11.0a0"
+acpp-nightly = "==2026.09.03"
+acpp-tools-nightly = "==2026.09.03"
 
 [feature.dev.target.linux-64.dependencies]
-acpp-clangxx_linux-64 = ">=25.10.0,<25.11.0a0"
-acpp-clang_linux-64 = ">=25.10.0,<25.11.0a0"
+acpp-clangxx-nightly_linux-64 = "==2026.09.03"
+acpp-clang-nightly_linux-64 = "==2026.09.03"
 
 [feature.dev.tasks]
 configure = "nu scripts/configure.nu dev"
