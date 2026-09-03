@@ -13,15 +13,27 @@ preview = ["pixi-build"]
 c_compiler = ["acpp-clang-nightly"]
 cxx_compiler = ["acpp-clangxx-nightly"]
 
+[feature.opencl.activation.env]
+ACPP_VISIBILITY_MASK = "omp;ocl"
+
 [feature.opencl.dependencies]
 intel-opencl-rt = ">=2025.2.0,<2026"
+
+[feature.level-zero.activation.env]
+ACPP_VISIBILITY_MASK = "omp;ze"
 
 [feature.level-zero.dependencies]
 level-zero = ">=1.28.2,<2"
 
+[feature.cuda.activation.env]
+ACPP_VISIBILITY_MASK = "omp;cuda"
+
 [feature.cuda.dependencies]
 cuda-nvvm = ">=12.6,<12.7"
 cuda-runtime = ">=12.6,<12.7"
+
+[feature.amd.activation.env]
+ACPP_VISIBILITY_MASK = "omp;hip"
 
 [feature.amd.dependencies]
 hip-runtime-amd = ">=6,<7"
@@ -92,6 +104,13 @@ extra-input-globs = ["include/**/*.hpp"]
 # ------------------------------------------------------------------------------
 [feature.dev.dev]
 slabkit = { path = "." }
+
+[feature.dev.activation.env]
+# A dev environment tests the backends it actually carries. Without this the
+# default selector reaches any device the system driver exposes -- on a box with
+# an NVIDIA driver, dev-omp would run its kernels on the GPU in an environment
+# that has no nvvm libdevice to compile them with.
+ACPP_VISIBILITY_MASK = "omp"
 
 [feature.dev.dependencies]
 nushell = ">=0.110.0,<0.111"
