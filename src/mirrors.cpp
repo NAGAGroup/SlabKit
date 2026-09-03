@@ -71,8 +71,26 @@ sycl::event via_staged(queue& q, const sycl::device& src_dev, const sycl::device
                        const std::vector<sycl::event>& deps) {
     auto stage = std::make_shared<std::vector<std::byte>>(bytes);
 
-    q.submit(src_dev, deps,
-             [&](sycl::handler& h) { h.memcpy(stage->data(), src, bytes); });
+    sycl::event filled =
+        q.submit(src_dev, deps, [&](sycl::handler& h) { h.memcpy(stage->data(), src, bytes); });
+
+    // REDUNDANT TODAY, AND DELIBERATE. The stream already waits on the host at
+    // a backend transition (see `detail::submission`), so by the time leg 2 is
+    // submitted leg 1 has completed and this wait returns immediately.
+    //
+    // It is here because THIS route cannot survive losing that. The
+    // intermediate is pageable host memory, which is the exact shape measured
+    // wrong 39 of 40 times when a cross-backend dependency was left to the
+    // runtime -- silently, with no diagnostic. If the queue's transition wait
+    // is ever removed or narrowed, the staged route would go back to corrupting
+    // data with nothing in this file to say why.
+    //
+    // So: of the two waits a reader will find, the one in `queue::body` is the
+    // load-bearing one for the stream's in-order contract generally, and this
+    // one is load-bearing for this route specifically. Deleting either alone is
+    // safe today; deleting both is not, and nothing would fail loudly.
+    if (!(src_dev.get_platform() == dst_dev.get_platform())) filled.wait();
+
     sycl::event landed =
         q.submit(dst_dev, [&](sycl::handler& h) { h.memcpy(dst, stage->data(), bytes); });
 
