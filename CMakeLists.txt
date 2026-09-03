@@ -26,6 +26,8 @@ set(SLABKIT_SOURCES
     src/arena.cpp
     src/pool.cpp
     src/site.cpp
+    src/mirrors.cpp
+    src/allocator.cpp
 )
 
 add_library(naga-slabkit SHARED ${SLABKIT_SOURCES})

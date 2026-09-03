@@ -22,6 +22,7 @@
 // ADL reaches both from a call whose arguments include a sycl::queue. Call
 // slabkit's QUALIFIED.
 
+#include "naga/slabkit/allocator.hpp"
 #include "naga/slabkit/arena.hpp"
 #include "naga/slabkit/capabilities.hpp"
 #include "naga/slabkit/context.hpp"
@@ -30,5 +31,7 @@
 #include "naga/slabkit/make.hpp"
 #include "naga/slabkit/make_shared.hpp"
 #include "naga/slabkit/malloc.hpp"
+#include "naga/slabkit/mirrors.hpp"
 #include "naga/slabkit/pool.hpp"
 #include "naga/slabkit/queue.hpp"
+#include "naga/slabkit/usm_vector.hpp"

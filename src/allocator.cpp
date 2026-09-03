@@ -1,0 +1,136 @@
+// =============================================================================
+// allocator.cpp — the allocator's route, and its deferred release
+// =============================================================================
+
+#include "naga/slabkit/allocator.hpp"
+
+#include <new>
+#include <stdexcept>
+#include <utility>
+
+#include "detail/access.hpp"
+#include "detail/arena_impl.hpp"
+#include "detail/os_alloc.hpp"
+#include "detail/pool_impl.hpp"
+#include "naga/slabkit/context.hpp"
+#include "naga/slabkit/detail/core.hpp"
+
+namespace naga::slabkit::detail {
+
+AllocRoute::AllocRoute(queue q, kind k, const sycl::device& dev)
+    : q_{std::move(q)}, kind_{k}, from_{from::os}, dev_{dev} {}
+
+AllocRoute::AllocRoute(queue q, kind k) : q_{std::move(q)}, kind_{k}, from_{from::os} {
+    dev_ = q_.get_device();
+}
+
+AllocRoute::AllocRoute(queue q, DeviceArena arena)
+    : q_{std::move(q)}
+    , kind_{arena.get_kind()}
+    , from_{from::arena}
+    , dev_{arena.device()}
+    , arena_{std::move(arena)} {}
+
+AllocRoute::AllocRoute(queue q, DevicePool pool)
+    : q_{std::move(q)}
+    , kind_{pool.get_kind()}
+    , from_{from::pool}
+    , dev_{pool.device()}
+    , pool_{std::move(pool)} {}
+
+const queue& AllocRoute::get_queue() const noexcept { return q_; }
+kind         AllocRoute::get_kind() const noexcept { return kind_; }
+
+const sycl::device& AllocRoute::get_device() const {
+    if (kind_ == kind::host)
+        throw std::invalid_argument{
+            "naga::slabkit::allocator: host memory belongs to a context, not a device"};
+    return *dev_;
+}
+
+void* AllocRoute::raw_allocate(std::size_t bytes, std::size_t align) {
+    if (bytes == 0) return nullptr;
+
+    unique_usm_ptr<std::byte[]> h;
+
+    switch (from_) {
+        case from::arena:
+            // An arena is a budget: no fallback. Running out is bad_alloc.
+            h = Site::at(kind_, q_, *arena_).storage(bytes, align, align, {});
+            break;
+        case from::pool:
+            h = Site::at(kind_, q_, *pool_).storage(bytes, align, align, {});
+            if (!h) {
+                // Exhausted or too fragmented: the OS route still works, and
+                // the deferred release recognises the address as not the
+                // pool's.
+                h = Site::at(kind_, q_, *dev_).storage(bytes, align, align, {});
+            }
+            break;
+        case from::os:
+            // The host kind ignores the device except to reach its backend's
+            // context, which is exactly what this placement resolves.
+            h = Site::at(kind_, q_, *dev_).storage(bytes, align, align, {});
+            break;
+    }
+
+    if (!h) throw std::bad_alloc{};
+
+    // The handle's deleter is dropped here on purpose: an allocator's release
+    // is deferred and decides by address, so carrying a deleter would only
+    // offer a second, immediate way to free -- exactly what deallocate exists
+    // to prevent.
+    return h.release();
+}
+
+void AllocRoute::raw_deallocate(void* p, std::size_t bytes) noexcept {
+    if (p == nullptr) return;
+
+    // An arena has no per-allocation free; the arena handle this route holds is
+    // what keeps the slab alive, and it outlives every allocation from it.
+    if (from_ == from::arena) return;
+
+    try {
+        std::shared_ptr<PoolImpl> pool_impl;
+        if (from_ == from::pool) pool_impl = PoolAccess::impl(*pool_);
+
+        const sycl::context ctx = q_.get_context().context_of(*dev_);
+
+        // A NON-owning reference to the stream. A strong one would mean the
+        // last handle to the stream is routinely dropped by a pool thread from
+        // inside this task, leaving nothing on the owner's thread able to wait
+        // for teardown -- which is a segfault at process exit, measured. The
+        // stream's own destructor drains the pool, so this task always runs
+        // while the stream is either alive or already finished.
+        auto ws = weak_state(q_);
+        q_.submit_host([ws, p, bytes, ctx, pool_impl]() mutable {
+            wait_if_alive(ws);
+            if (pool_impl && pool_impl->owns(p)) {
+                const std::size_t nodes =
+                    align_up(bytes, pool_impl->node_size()) / pool_impl->node_size();
+                pool_impl->release(p, nodes);
+            } else {
+                sycl::free(p, ctx);
+            }
+        });
+    } catch (...) {
+        // deallocate is noexcept. Losing the memory is worse than leaking it,
+        // but there is nowhere to report from here.
+    }
+}
+
+bool AllocRoute::equals(const AllocRoute& other) const noexcept {
+    if (kind_ != other.kind_ || from_ != other.from_) return false;
+    if (!(q_ == other.q_)) return false;
+
+    switch (from_) {
+        case from::arena:
+            return ArenaAccess::impl(*arena_) == ArenaAccess::impl(*other.arena_);
+        case from::pool: return PoolAccess::impl(*pool_) == PoolAccess::impl(*other.pool_);
+        case from::os: break;
+    }
+    if (kind_ == kind::host) return true;  // host memory names no device
+    return dev_.has_value() && other.dev_.has_value() && *dev_ == *other.dev_;
+}
+
+}  // namespace naga::slabkit::detail

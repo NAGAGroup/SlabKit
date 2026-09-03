@@ -113,7 +113,15 @@ public:
         }
     }
 
-    kind        get_kind() const noexcept { return kind_; }
+    kind get_kind() const noexcept { return kind_; }
+
+    /// Is this address inside the pool's own grid? The allocator's deferred
+    /// release has only the address to go on.
+    bool owns(const void* p) const noexcept {
+        const auto* b = static_cast<const std::byte*>(p);
+        return base_ != nullptr && b >= base_ && b < base_ + slot_count_ * node_size_;
+    }
+
     std::size_t node_size() const noexcept { return node_size_; }
     std::size_t slot_count() const noexcept { return slot_count_; }
 
