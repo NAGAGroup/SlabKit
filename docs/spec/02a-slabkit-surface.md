@@ -131,11 +131,18 @@ what runs on the host — including every memory operation, since a copy is
 host-issued. That is the axis the stream is built on, not memory versus
 compute.
 
-**How they order.** Kernel work is in order with kernel work. Host work is
-**parallel** with other host work. The two interlock: all outstanding host
-work completes before any kernel work begins, and all outstanding kernel work
-completes before any host work begins. The stream therefore alternates
-phases, each internally parallel, and behaves in order from outside.
+**How they order.** Kernel work is in order with kernel work. Host work
+carries **no dependency** on other host work. The two interlock: all
+outstanding host work completes before any kernel work begins, and all
+outstanding kernel work completes before any host work begins. The stream
+therefore alternates phases and behaves in order from outside.
+
+Whether two host items *execute* concurrently is the backend's to decide, and
+AdaptiveCpp's OpenMP backend offers one execution lane per device for the
+whole process — so host items run one at a time there. That is a property of
+the runtime, not of this contract: the absence of a dependency is what
+slabkit promises, and an implementation with more lanes delivers the
+concurrency without any change here.
 
 Internally, per backend in the context: one in-order and one out-of-order
 `sycl::queue`, both `AdaptiveCpp_retargetable`, on `context_of(backend)`,
@@ -205,9 +212,9 @@ public:
 Rules:
 
 - **The interlock.** A kernel item depends on the outstanding host events and
-  the kernel tail. A host item depends on the outstanding kernel events and
-  **not** on other host items. A group's members depend on the previous step
-  and not on each other, whatever kind they are.
+  the kernel tail, and absorbs that host set. A host item depends on the
+  kernel tail and **not** on other host items. A group's members depend on
+  the previous step and not on each other, whatever kind they are.
 - **Host work is an OpenMP `single_task` whose body is an indirect call**
   through a function pointer into ordinary host code. A direct call to
   complex host code from a kernel fails the generic flow's JIT; an indirect
@@ -228,10 +235,12 @@ Rules:
 - **Placement** is `AdaptiveCpp_retarget{dev}` routed to that device's
   backend pair — the extension's proper use: same backend, same context. A
   device outside the context is `std::invalid_argument`.
-- **Errors** are the internal queues': `throw_asynchronous` and
-  `wait_and_throw` forward to every internal queue including the host lane;
-  the handler is installed on each. A host task's exception surfaces there,
-  not in a future.
+- **Errors.** `throw_asynchronous` and `wait_and_throw` forward to every
+  internal queue including the host lane, and the handler is installed on
+  each. A host task's exception is asynchronous: the stream holds it and
+  rethrows it from `throw_asynchronous`, `wait_and_throw` or
+  `sync_host_work_and_throw`. It is never thrown at the caller of
+  `submit_host`, and it is never a future.
 - **Thread-safety** is one internal mutex over the lane map and step state,
   never held while waiting or submitting to a `sycl::queue`.
 - Not provided: memory shortcuts on the queue (§6 owns the routed forms),

@@ -25,7 +25,7 @@ q.wait();
 | | |
 |---|---|
 | `context` | the device set, one `sycl::context` per backend, and the answers to what the machine can do |
-| `queue` | one in-order stream over that context: placement, concurrent groups, a host-work pool |
+| `queue` | one stream over that context: kernel work and host work, placement, groups and chains |
 | `malloc_*` / `aligned_alloc_*` | uninitialized storage, SYCL's names and signatures |
 | `make_unique_*` / `make_shared_*` | constructed objects, `std::make_unique`'s forms |
 | `DeviceArena` / `DevicePool` | a bump region and a fixed-node free list, each over one slab |
@@ -93,18 +93,52 @@ auto events = q.submit_group([&](sk::queue::group& g) {
 });
 ```
 
-**Host work runs on a pool, never on your thread.**
+**Host work is the other half of the stream.** Anything that runs on the host
+— including every copy — is host work. It runs off your thread, after the
+kernel work outstanding when you submitted it, and gives you an ordinary
+event.
 
 ```cpp
-std::future<void> done = q.submit_host([events]() mutable {
-    for (auto& e : events) e.wait();     // depend on device work by waiting inside
-    ...                                   // then touch the memory
+sycl::event done = q.submit_host([p = data.get()] {
+    use_on_the_host(p);              // runs after the kernel work above it
+});
+q.sync_host_work();                  // wait the host side alone
+```
+
+Kernel work is in order with kernel work; host work carries no dependency on
+other host work; and the two interlock — all outstanding host work finishes
+before the next kernel item starts, and all outstanding kernel work finishes
+before the next host item starts. That is what makes the stream feel in order
+without forcing everything into one line.
+
+When host work *must* be ordered against other host work, chain it. A chain
+is one host item as far as the stream is concerned:
+
+```cpp
+q.submit_chain([&](sk::queue::chain& c) {
+    c.then([&] { stage_it(); });
+    c.then([&] { ship_it(); });      // begins after the first completes
 });
 ```
 
-Host tasks never depend on one another — compose two into one if you need
-ordering. A host task may submit to the stream and wait on what it submitted.
-`wait()` does not drain the pool.
+And when you want host work to run *alongside* kernel work rather than
+interlocked with it, put both in a group:
+
+```cpp
+q.submit_group([&](sk::queue::group& g) {
+    g.submit(dev, [&](sycl::handler& h) { h.parallel_for(r, kernel); });
+    g.submit_host([&] { prepare_the_next_batch(); });
+});
+```
+
+A host task's exception is asynchronous: it surfaces from `wait_and_throw`,
+`throw_asynchronous` or `sync_host_work_and_throw`, never at the call.
+
+One limit worth knowing: AdaptiveCpp's OpenMP backend offers a single
+execution lane per device for the whole process, so host items run one at a
+time even though nothing orders them. slabkit does not add a dependency
+between them, so an implementation with more lanes runs them concurrently
+with no change to your code.
 
 Every member is safe to call from any thread.
 
@@ -153,11 +187,18 @@ allocations are node-size aligned.
 
 ## Copying
 
-The four mirrors take the stream and return an event. `memcpy` and `copy` find
-their operands and choose a route: a direct device-to-device copy when the
+The four mirrors take the stream and return an event. **Every copy is host
+work** (see above): it runs off your thread, after the kernel work it was
+ordered behind, and nothing here blocks the caller. `memcpy` and `copy` find
+their operands and choose a route — a direct device-to-device copy when the
 devices share a backend, a host-side copy when both allocations are
 host-accessible, and otherwise a staged copy through a host intermediate. A
 plain host pointer is a legal operand.
+
+That ordering is not a nicety. A copy whose host operand is not USM in the
+issuing queue''s context has that operand read when the copy is *issued*, so a
+dependency cannot protect it; slabkit never issues a copy until what it
+depends on has already finished.
 
 ```cpp
 sk::memcpy(q, dst, src, bytes);
