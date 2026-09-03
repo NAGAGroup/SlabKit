@@ -12,7 +12,7 @@ handles and one in-order stream of work. Seven parts, each specified below:
 1. `context` — the device set, one `sycl::context` per backend, and the
    answers to what the machine can do.
 2. `queue` — one in-order stream over the context, mirroring `sycl::queue`,
-   with placement, concurrent groups, and a host-work pool.
+   with placement, concurrent groups, and a host lane.
 3. The **storage** (`malloc_*`) and **object** (`make_*`) families over
    three USM kinds and six placements, yielding one handle type.
 4. **Capabilities** — the `aspect` vocabulary, three-valued answers, copy
@@ -122,48 +122,81 @@ Rules:
 
 ## 3. `queue`
 
-One in-order stream of work over a `context`, with `sycl::queue`'s surface.
+One stream of work over a `context`, with `sycl::queue`'s surface. A light
+handle: copies are the same stream. Every member is safe to call from any
+thread.
+
+**Two kinds of work.** *Kernel work* is what runs on a device. *Host work* is
+what runs on the host — including every memory operation, since a copy is
+host-issued. That is the axis the stream is built on, not memory versus
+compute.
+
+**How they order.** Kernel work is in order with kernel work. Host work is
+**parallel** with other host work. The two interlock: all outstanding host
+work completes before any kernel work begins, and all outstanding kernel work
+completes before any host work begins. The stream therefore alternates
+phases, each internally parallel, and behaves in order from outside.
+
 Internally, per backend in the context: one in-order and one out-of-order
 `sycl::queue`, both `AdaptiveCpp_retargetable`, on `context_of(backend)`,
-created lazily; and one thread pool. A light handle: copies are the same
-stream. Every member is safe to call from any thread.
+created lazily. Plus one out-of-order **host lane** on the OpenMP backend,
+which always exists.
 
 ```cpp
 namespace naga::slabkit {
 
 class queue {
 public:
-    explicit queue(context ctx, sycl::async_handler handler = {}, std::size_t host_threads = 2);
+    explicit queue(context ctx, sycl::async_handler handler = {});
 
     const context&      get_context() const;
     const sycl::device& get_device()  const;   // the default device: ctx.devices().front()
 
-    // sycl::queue's surface. `props` may carry AdaptiveCpp_retarget; a device argument is
-    // that property applied by slabkit. Every shortcut is implemented through submit,
-    // never through sycl::queue's shortcuts, and every shortcut has the forms:
+    // ---- kernel work: sycl::queue's surface ---------------------------------
+    // `props` may carry AdaptiveCpp_retarget; a device argument is that property
+    // applied by slabkit. Every shortcut is implemented through submit, never through
+    // sycl::queue's shortcuts, and every shortcut has the forms:
     //   (cgf...), (dev, cgf...), (deps, cgf...), (dev, deps, cgf...)
     template <class CGF> sycl::event submit(CGF&& cgf);
     template <class CGF> sycl::event submit(const sycl::property_list& props, CGF&& cgf);
     template <class CGF> sycl::event submit(const sycl::device& dev, CGF&& cgf);
     // single_task, parallel_for (range, nd_range, offset, reduction forms) as sycl::queue declares them
-    void wait();
-    void wait_and_throw();
-    void throw_asynchronous();
-    std::vector<sycl::event> get_wait_list() const;   // union over the internal queues (ACPP_EXT_QUEUE_WAIT_LIST)
 
-    // One logical step of concurrent submissions: each depends on the previous step,
-    // none on each other; the next step depends on all of them. Only the command-group
-    // form, so a group may mix kernels, copies and custom operations, and may span devices.
+    // ---- host work ----------------------------------------------------------
+    // Runs on the host lane, off the caller's thread, after the kernel work
+    // outstanding when it was submitted. Parallel with other host work.
+    template <class F> sycl::event submit_host(F&& f);
+
+    // Host work items forced in order with each other: the opposite of a group.
+    // Each item begins after the previous one completes; the chain is ONE host-work
+    // item as far as the stream is concerned.
+    class chain {
+    public:
+        template <class F> sycl::event then(F&& f);
+    };
+    template <class F> sycl::event submit_chain(F&& f);    // f(chain&); returns the chain's last event
+
+    // ---- one step of concurrent work ---------------------------------------
+    // Members run concurrently and are one step: each depends on the previous step,
+    // none on each other, and the next step depends on all of them. A group may mix
+    // kernel work and host work, which is how the interlock is opted out of.
     class group {
     public:
         template <class CGF> sycl::event submit(CGF&& cgf);
         template <class CGF> sycl::event submit(const sycl::property_list& props, CGF&& cgf);
         template <class CGF> sycl::event submit(const sycl::device& dev, CGF&& cgf);
+        template <class F>   sycl::event submit_host(F&& f);
+        template <class F>   sycl::event submit_chain(F&& f);   // contributes the chain's LAST event
     };
-    template <class F> std::vector<sycl::event> submit_group(F&& f);   // f(group&); returns the step's events
+    template <class F> std::vector<sycl::event> submit_group(F&& f);   // f(group&)
 
-    // Host work on the pool, never on the caller's thread.
-    template <class F> std::future<std::invoke_result_t<F>> submit_host(F&& f);
+    // ---- waiting ------------------------------------------------------------
+    void wait();                      // everything, kernel and host
+    void wait_and_throw();
+    void sync_host_work();            // the host side alone
+    void sync_host_work_and_throw();
+    void throw_asynchronous();
+    std::vector<sycl::event> get_wait_list() const;   // union over the internal queues (ACPP_EXT_QUEUE_WAIT_LIST)
 };
 
 } // namespace naga::slabkit
@@ -171,32 +204,38 @@ public:
 
 Rules:
 
-- **In order across backends.** A submission runs on its backend's in-order
-  queue with `depends_on(get_wait_list())`; a group's submissions run on the
-  out-of-order queue with the same dependency. Events cross queues and
-  backends, so cross-backend order costs nothing extra.
+- **The interlock.** A kernel item depends on the outstanding host events and
+  the kernel tail. A host item depends on the outstanding kernel events and
+  **not** on other host items. A group's members depend on the previous step
+  and not on each other, whatever kind they are.
+- **Host work is an OpenMP `single_task` whose body is an indirect call**
+  through a function pointer into ordinary host code. A direct call to
+  complex host code from a kernel fails the generic flow's JIT; an indirect
+  call does not, and the two captured values — a function pointer and a
+  `void*` — are trivially copyable, which kernel captures must be.
+- **A host task must never submit work to the OpenMP backend and wait on
+  it.** That deadlocks: the wait holds the very lane the submitted work
+  needs. Work on *other* backends may be issued and waited freely — that does
+  not consume the host lane's capacity. A copy whose operands are both on the
+  OpenMP backend is therefore a plain host `memcpy`, never a submission.
+- **Ordering across backends is by `depends_on`, and it holds**, because the
+  consumer of every cross-backend dependency is the host lane, which honours
+  foreign events. slabkit never submits a non-OpenMP operation carrying a
+  dependency on another backend's event. That restriction is load-bearing: a
+  copy whose host operand is not USM in the issuing queue's context has that
+  operand read when the copy is *issued*, so a dependency cannot protect it —
+  measured wrong 40 times in 40, indistinguishable from no dependency at all.
 - **Placement** is `AdaptiveCpp_retarget{dev}` routed to that device's
   backend pair — the extension's proper use: same backend, same context. A
   device outside the context is `std::invalid_argument`.
 - **Errors** are the internal queues': `throw_asynchronous` and
-  `wait_and_throw` forward to every internal queue; the handler is installed
-  on each.
-- **Host tasks** depend on device work by waiting inside on events they
-  captured; the core queues never depend on host tasks; host tasks never
-  depend on each other (compose in one task); a host task may submit to the
-  core queues and wait on what it submitted. A host task's exception lives
-  in its future. `wait()` does not drain the pool.
-- **Why a pool, not custom operations:** AdaptiveCpp evaluates a custom
-  operation's callable inside `submit()` on the caller's thread on backends
-  with native streams (measured on CUDA, in-order and out-of-order alike),
-  before its dependencies complete; a queue submission from inside it can
-  deadlock; and AdaptiveCpp has no `host_task`. A pool is the only place
-  host work runs later, off the caller, after work it chooses to wait on.
-- **Thread-safety** is one internal mutex over the backend-pair map and
-  group state, never held while waiting or submitting to a `sycl::queue`.
+  `wait_and_throw` forward to every internal queue including the host lane;
+  the handler is installed on each. A host task's exception surfaces there,
+  not in a future.
+- **Thread-safety** is one internal mutex over the lane map and step state,
+  never held while waiting or submitting to a `sycl::queue`.
 - Not provided: memory shortcuts on the queue (§6 owns the routed forms),
-  barriers (the in-order contract is the barrier), priorities, any way to
-  make a core queue depend on a host task.
+  barriers (the interlock is the barrier), priorities.
 
 ## 4. Kinds, handles, storage, objects
 
@@ -374,21 +413,33 @@ template <class T> sycl::event fill  (queue& q, void* p, const T& pattern, size_
 
 Rules:
 
-- Each call is one item of the stream. `memcpy` and `copy` locate their
-  operands through the queue's context (`get_pointer_type`,
-  `get_pointer_device`; a non-USM pointer is a host operand) and take
-  `copy_routes(...).front()`: **d2d** — one `sycl::queue::memcpy` on the
-  destination's backend queue; **host_memcpy** — a host task that waits the
-  dependencies and the stream's wait list, then `std::memcpy` between the
-  two host-accessible allocations (the one place slabkit touches shared
-  memory from the host; take-turns enforced here); **staged** — D2H into an
-  operation-owned host intermediate, then H2D, two items.
-- Host routes return the event of a trailing no-op item ordered after the
-  host work, so every route composes with `depends_on`.
+- **Every mirror is host work** (§3): one host item, returning its event, off
+  the caller's thread, ordered after the kernel work outstanding when it was
+  called and parallel with other host work. Nothing here blocks the caller.
+- `memcpy` and `copy` locate their operands through the queue's context
+  (`get_pointer_type`, `get_pointer_device`; a non-USM pointer is a host
+  operand) and take `copy_routes(...).front()`. Inside the host task:
+  **d2d** — one `sycl::queue::memcpy` on the destination's backend queue,
+  waited there; **host_memcpy** — a plain `std::memcpy` between the two
+  host-accessible allocations; **staged** — a chain, D2H into an
+  operation-owned host intermediate and then H2D.
+- **The copy is issued only after its dependencies are already satisfied**,
+  because the host task carrying it is what waits. So no submission ever
+  carries a dependency on another backend's event, and the issue-time read of
+  a host operand cannot see unwritten memory. This is what makes a pageable
+  intermediate safe; it is not made safe by the intermediate's kind, and an
+  intermediate cannot be USM in two contexts at once anyway.
+- **A copy whose operands are both on the OpenMP backend is a plain host
+  `memcpy`**, never a submission — a host task that submits to the OpenMP
+  backend and waits on it deadlocks.
+- Take turns is enforced here: the host task runs after the kernel work it
+  was ordered behind, so slabkit never touches shared memory concurrently
+  with a kernel.
 - `memset` and `fill` have one operand and never route: they run on the
   operand's owning device, or as a host write for a trivially-copyable
   pattern into shared or host memory.
-- An operand no backend context recognises is `errc::invalid` at the call.
+- A non-USM pointer is a host operand, always. There is no unrecognised
+  operand.
 - Not provided: `prefetch`, `mem_advise` (backend hints; call SYCL's
   directly), staging-buffer reuse.
 
@@ -429,11 +480,11 @@ Rules:
 - `allocate` is the storage family with `bad_alloc` instead of null. The
   pool route tries the pool, then the OS route on exhaustion; the arena
   route never falls back — an arena is a budget.
-- `deallocate` never frees on the calling thread: it posts one host task
-  holding a copy of the queue handle, which calls `q.wait()` and then
-  releases by the route the address belongs to — pool if inside the pool's
-  slab, otherwise OS; arena route: nothing. Always posted; the address range
-  is the only record.
+- `deallocate` never frees on the calling thread: it posts one host item
+  (§3), which is therefore ordered after the kernel work outstanding when it
+  was called, and releases by the route the address belongs to — pool if
+  inside the pool's slab, otherwise OS; arena route: nothing. Always posted;
+  the address range is the only record.
 - std containers over the shared and host kinds work unchanged. Over the
   device kind they are a usage error: element access is a host dereference
   of device memory. The device kind is for `usm_vector` and for handle
