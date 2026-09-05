@@ -1,19 +1,19 @@
 // =============================================================================
-// test_host_work.cpp — the host lane, the interlock, chains, and mixed groups
+// test_host_work.cpp — the three submission types and how they order
 // =============================================================================
 //
-// Host work is an OpenMP single_task whose body is an indirect call through a
-// function pointer. Everything below is a property of that mechanism that a
-// caller would otherwise have to take on trust:
+// Every assertion here is ORDER-SENSITIVE and built from operations that do not
+// commute: +1, then ×10, then +1 is 11 only in that order. A test whose steps
+// commute passes on a broken ordering, which is the failure mode this file
+// exists to rule out.
 //
-//   1. a host item runs off the caller's thread and yields a usable event,
-//   2. host items run in PARALLEL with each other,
-//   3. the interlock holds in both directions,
-//   4. a chain runs in order and counts as one host item,
-//   5. a group may mix kernel and host members,
-//   6. a routed copy is a legal group member, contributing its chain's LAST
-//      event,
-//   7. a cross-backend routed copy is right every time -- the original defect.
+//   1. a host task runs off the caller's thread and yields a usable event,
+//   2. host/memory tasks are concurrent with each other,
+//   3. the _in_order variants are serialized,
+//   4. kernel-then-memory and memory-then-kernel are ordered by the merges,
+//   5. a group is one task: unordered inside, ordered in both directions
+//      outside,
+//   6. an in-order host task may be placed on a device.
 
 #include <atomic>
 #include <chrono>
@@ -44,7 +44,7 @@ struct Stream {
     Stream() : ctx{sycl::device{sycl::default_selector_v}}, q{ctx}, dev{ctx.devices().front()} {}
 
     /// Host USM: reachable from a kernel AND from a host task, which is what
-    /// every interlock assertion here needs.
+    /// every ordering assertion here needs.
     int* alloc_host(std::size_t n) {
         void* p = sycl::malloc_host(n * sizeof(int), ctx.context_of(dev));
         REQUIRE(p != nullptr);
@@ -70,13 +70,13 @@ constexpr int kSpins = 4000000;
 // 1. off the caller's thread, with a usable event
 // -----------------------------------------------------------------------------
 
-TEST_CASE("host work runs off the caller's thread and yields a usable event", "[host]") {
+TEST_CASE("a host task runs off the caller's thread and yields a usable event", "[host]") {
     Stream s;
 
     auto ran    = std::make_shared<std::atomic<bool>>(false);
     auto thread = std::make_shared<std::atomic<std::thread::id>>();
 
-    sycl::event e = s.q.submit_host([ran, thread] {
+    sycl::event e = s.q.async_host([ran, thread] {
         thread->store(std::this_thread::get_id());
         ran->store(true);
     });
@@ -89,69 +89,150 @@ TEST_CASE("host work runs off the caller's thread and yields a usable event", "[
 TEST_CASE("a host task's exception is asynchronous, not thrown at the caller", "[host]") {
     Stream s;
 
-    sycl::event e = s.q.submit_host([] { throw std::runtime_error{"boom"}; });
-    e.wait();  // the item completes; the throw did not escape into kernel code
+    sycl::event e = s.q.async_host([] { throw std::runtime_error{"boom"}; });
+    e.wait();  // the task completes; the throw did not escape the runtime
 
-    REQUIRE_THROWS_AS(s.q.sync_host_work_and_throw(), std::runtime_error);
+    REQUIRE_THROWS_AS(s.q.wait_and_throw(), std::runtime_error);
 }
 
 // -----------------------------------------------------------------------------
-// 2. host work is parallel with host work
+// 2. host/memory tasks are concurrent with each other
 // -----------------------------------------------------------------------------
 
-/// Host items carry NO dependency on each other -- that is the structural
-/// property the stream promises, and it is what this asserts. Whether they then
-/// RUN at the same time is the backend's business, and on this toolchain the
-/// answer is no: `omp_hardware_context::get_max_kernel_concurrency()` returns 1
-/// (src/runtime/omp/omp_hardware_manager.cpp:31), so the OpenMP device offers
-/// one execution lane for the whole process and every host item queues behind
-/// the one before it. Measured: four 200 ms items take 800 ms, on one
-/// out-of-order queue or four, under either scheduler.
-///
-/// So the assertion is the part that must hold, and the WARN is the part the
-/// runtime decides. A future acpp with more host lanes turns the warning off
-/// without touching this test.
-TEST_CASE("host items do not wait for each other, and none of them blocks the caller", "[host]") {
+TEST_CASE("host tasks run concurrently with each other and never block the caller", "[host]") {
     Stream s;
 
-    const int  items = 4;
+    const int  tasks = 4;
     const auto ms    = std::chrono::milliseconds{200};
 
     auto ran = std::make_shared<std::atomic<int>>(0);
 
     const auto submitted_at = std::chrono::steady_clock::now();
-    for (int i = 0; i < items; ++i)
-        s.q.submit_host([ran, ms] {
+    for (int i = 0; i < tasks; ++i)
+        s.q.async_host([ran, ms] {
             std::this_thread::sleep_for(ms);
             ran->fetch_add(1);
         });
     const auto submit_cost = std::chrono::steady_clock::now() - submitted_at;
 
     // Submitting host work never runs it: the caller is back before the first
-    // item can possibly have finished.
+    // task can possibly have finished.
     REQUIRE(submit_cost < ms);
 
     const auto before = std::chrono::steady_clock::now();
-    s.q.sync_host_work();
+    s.q.wait();
     const auto elapsed = std::chrono::steady_clock::now() - before;
 
-    REQUIRE(ran->load() == items);
-
-    if (elapsed > (items - 1) * ms)
-        WARN("the OpenMP backend ran these host items one at a time: it reports a kernel "
-             "concurrency of 1, so the host lane is a single execution lane for the process");
+    REQUIRE(ran->load() == tasks);
+    // Serialized, these would take four sleeps; concurrent, they take one.
+    REQUIRE(elapsed < (tasks - 1) * ms);
 }
 
-// -----------------------------------------------------------------------------
-// 3. the interlock, both directions
-// -----------------------------------------------------------------------------
-
-TEST_CASE("a host item begins after the kernel work outstanding when it was submitted",
-          "[host]") {
+TEST_CASE("two host tasks over the same bytes are ordered by the caller's event", "[host]") {
     Stream s;
 
     int* p = s.alloc_host(1);
+    p[0]   = 1;
+
+    // ×10 then +1 is 11; the other order is 20. Only the event says which.
+    sycl::event scale = s.q.async_host([p] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        p[0] = p[0] * 10;
+    });
+    s.q.async_host(std::vector<sycl::event>{scale}, [p] { p[0] = p[0] + 1; });
+    s.q.wait();
+
+    REQUIRE(p[0] == 11);
+    s.release(p);
+}
+
+// -----------------------------------------------------------------------------
+// 3. the _in_order variants are serialized
+// -----------------------------------------------------------------------------
+
+TEST_CASE("in-order host tasks run one after another, in submission order", "[host]") {
+    Stream s;
+
+    int* p = s.alloc_host(1);
+    p[0]   = 1;
+
+    // A descending sleep, and three operations no two of which commute: run in
+    // submission order this is 1 -> 2 -> 20 -> 27, and run in sleep order --
+    // which is what a concurrent lane produces -- it is 81.
+    s.q.async_host_in_order([p] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{120});
+        p[0] = p[0] + 1;
+    });
+    s.q.async_host_in_order([p] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{60});
+        p[0] = p[0] * 10;
+    });
+    s.q.async_host_in_order([p] { p[0] = p[0] + 7; });
+    s.q.wait();
+
+    REQUIRE(p[0] == 27);
+    s.release(p);
+}
+
+TEST_CASE("in-order memory tasks are serialized against each other", "[host]") {
+    Stream s;
+
+    // Two memory tasks over the SAME bytes and nothing else ordering them: the
+    // asynchronous variants would overlap, and the second's bytes would land
+    // among the first's. Large enough that they genuinely overlap.
+    const std::size_t n = 1u << 22;
+
+    int* p = s.alloc_host(n);
+    std::vector<int> src(n, 7);
+
+    const int five = 5;
+    s.q.fill_in_order(p, five, n);
+    s.q.memcpy_in_order(p, src.data(), n * sizeof(int));
+    s.q.wait();
+
+    std::size_t wrong = 0;
+    for (std::size_t i = 0; i < n; ++i)
+        if (p[i] != 7) ++wrong;
+    REQUIRE(wrong == 0);
+
+    s.release(p);
+}
+
+TEST_CASE("in-order memory tasks join the kernel order", "[host]") {
+    Stream s;
+
+    int* p = s.alloc_host(2);
     p[0]   = 0;
+    p[1]   = 0;
+
+    const int one = 1;
+    const int ten = 10;
+
+    // fill 1, then ×10 in a kernel, then +1 by a host task: 11 in this order,
+    // and 1, 2 or 10 in any other.
+    s.q.fill_in_order(p, one, 1);
+    s.q.single_task([=] { p[0] = p[0] * ten; });
+    s.q.async_host_in_order([p] { p[0] = p[0] + 1; });
+    s.q.memcpy_in_order(p + 1, p, sizeof(int));
+    s.q.wait();
+
+    REQUIRE(p[0] == 11);
+    REQUIRE(p[1] == 11);
+    s.release(p);
+}
+
+// -----------------------------------------------------------------------------
+// 4. kernel-then-memory and memory-then-kernel
+// -----------------------------------------------------------------------------
+
+TEST_CASE("a memory task begins after the kernel work outstanding when it was submitted",
+          "[host]") {
+    Stream s;
+
+    int* p   = s.alloc_host(1);
+    int* out = s.alloc_host(1);
+    p[0]     = 0;
+    out[0]   = 0;
 
     const unsigned expected = churn(7u, kSpins);
     s.q.single_task([=] {
@@ -160,224 +241,113 @@ TEST_CASE("a host item begins after the kernel work outstanding when it was subm
         p[0] = static_cast<int>(acc);
     });
 
-    // No wait between the two: the interlock is the only thing ordering them.
-    auto saw = std::make_shared<std::atomic<int>>(0);
-    s.q.submit_host([p, saw] { saw->store(p[0]); }).wait();
+    // No wait between the two: the merge is the only thing ordering them.
+    s.q.memcpy(out, p, sizeof(int)).wait();
 
-    REQUIRE(saw->load() == static_cast<int>(expected));
+    REQUIRE(out[0] == static_cast<int>(expected));
     s.release(p);
+    s.release(out);
 }
 
-TEST_CASE("a kernel item begins after the host work outstanding when it was submitted",
-          "[host]") {
-    Stream s;
-
-    int* p   = s.alloc_host(2);
-    p[0]     = 0;
-    p[1]     = -1;
-
-    // A host item slow enough that a kernel which did not wait for it would
-    // read the old value.
-    s.q.submit_host([p] {
-        std::this_thread::sleep_for(std::chrono::milliseconds{300});
-        p[0] = 4242;
-    });
-
-    // No wait: the interlock is the only thing ordering these.
-    s.q.single_task([=] { p[1] = p[0]; });
-    s.q.wait();
-
-    REQUIRE(p[1] == 4242);
-    s.release(p);
-}
-
-// -----------------------------------------------------------------------------
-// 4. a chain runs in order
-// -----------------------------------------------------------------------------
-
-TEST_CASE("a chain's items run in order, and the chain is one host item", "[host]") {
-    Stream s;
-
-    auto log   = std::make_shared<std::vector<int>>();
-    auto mutex = std::make_shared<std::mutex>();
-
-    sycl::event last = s.q.submit_chain([&](queue::chain& ch) {
-        for (int i = 0; i < 4; ++i) {
-            ch.then([log, mutex, i] {
-                // A descending sleep: an out-of-order lane would interleave.
-                std::this_thread::sleep_for(std::chrono::milliseconds{40 - 10 * i});
-                std::lock_guard<std::mutex> lock{*mutex};
-                log->push_back(i);
-            });
-        }
-    });
-
-    last.wait();
-    REQUIRE(*log == std::vector<int>{0, 1, 2, 3});
-}
-
-TEST_CASE("an empty chain is still one host item", "[host]") {
-    Stream s;
-    sycl::event e = s.q.submit_chain([](queue::chain&) {});
-    e.wait();
-    s.q.sync_host_work();
-}
-
-// -----------------------------------------------------------------------------
-// 5. a group mixing kernel and host members
-// -----------------------------------------------------------------------------
-
-TEST_CASE("a group may mix kernel work and host work, and the next item waits for both",
-          "[host]") {
-    Stream s;
-
-    int* p = s.alloc_host(3);
-    for (int i = 0; i < 3; ++i) p[i] = 0;
-
-    const auto events = s.q.submit_group([&](queue::group& g) {
-        g.submit([&](sycl::handler& h) { h.single_task([=] { p[0] = 11; }); });
-        g.submit_host([p] { p[1] = 22; });
-    });
-    REQUIRE(events.size() == 2);
-
-    // The item after the group sees every member's write, of either kind.
-    s.q.single_task([=] { p[2] = p[0] + p[1]; });
-    s.q.wait();
-
-    REQUIRE(p[0] == 11);
-    REQUIRE(p[1] == 22);
-    REQUIRE(p[2] == 33);
-    s.release(p);
-}
-
-/// A group's host members are one step: they wait for what came before the
-/// group and for nothing inside it. With one host lane that is again a statement
-/// about dependencies rather than about wall time, so what is asserted is that
-/// no member waited for the kernel member beside it -- which a dependency edge
-/// would have forced.
-TEST_CASE("a group's host members do not wait for the group's other members", "[host]") {
+TEST_CASE("a kernel begins after the memory work outstanding when it was submitted", "[host]") {
     Stream s;
 
     int* p = s.alloc_host(1);
     p[0]   = 0;
 
-    auto host_done = std::make_shared<std::atomic<bool>>(false);
-
-    sycl::event kernel_event;
-    s.q.submit_group([&](queue::group& g) {
-        // A slow kernel member. If the host member depended on it, the host
-        // member could not finish before it did.
-        kernel_event = g.submit([&](sycl::handler& h) {
-            h.single_task([=] {
-                unsigned acc = 1u;
-                for (int spin = 0; spin < 20 * kSpins; ++spin) acc = acc * 1103515245u + 12345u;
-                p[0] = static_cast<int>(acc);
-            });
-        });
-        g.submit_host([host_done] { host_done->store(true); });
-    });
-
-    // Draining the host side alone must not require the kernel member: no
-    // dependency edge was created between them.
-    s.q.sync_host_work();
-    REQUIRE(host_done->load());
-
-    // Whether the kernel is STILL RUNNING at that point is the runtime's
-    // business, not the stream's, so it is reported rather than required. On the
-    // OpenMP device it cannot be: the kernel member and the host member share
-    // that backend's single execution lane.
-    const bool kernel_still_running =
-        kernel_event.get_info<sycl::info::event::command_execution_status>() !=
-        sycl::info::event_command_status::complete;
-    if (!kernel_still_running && !detail::is_host_backend(s.dev))
-        WARN("the group's kernel member had already finished when its host member did, so "
-             "this run did not observe the two overlapping");
-
+    const int five = 5;
+    s.q.fill(p, five, 1);
+    // No wait: the merge is the only thing ordering these. ×10 then +1 is 51;
+    // a kernel that ran first would leave 5.
+    s.q.single_task([=] { p[0] = p[0] * 10 + 1; });
     s.q.wait();
-    REQUIRE(host_done->load());
+
+    REQUIRE(p[0] == 51);
     s.release(p);
 }
 
 // -----------------------------------------------------------------------------
-// 6. a routed copy as a group member
+// 5. a group is one task
 // -----------------------------------------------------------------------------
 
-TEST_CASE("a routed copy is a group member, contributing its chain's last event", "[host]") {
+TEST_CASE("a group mixes kernel and memory subtasks, and is one task to both sides", "[host]") {
     Stream s;
 
-    const std::size_t n = 32;
+    int* p = s.alloc_host(4);
+    for (int i = 0; i < 4; ++i) p[i] = 0;
 
-    auto dst = sk::malloc_device<int>(n, s.q);
-    REQUIRE(dst);
+    // Before the group: the value every subtask starts from.
+    s.q.single_task([=] { p[0] = 2; });
 
-    std::vector<int> src(n);
-    for (std::size_t i = 0; i < n; ++i) src[i] = static_cast<int>(i) + 500;
-
-    int* other = s.alloc_host(1);
-    other[0]   = 0;
-
-    sycl::event copy_event;
-    const auto  events = s.q.submit_group([&](queue::group& g) {
-        // A host operand and a device operand: the staged route, which is a
-        // chain -- and the group records its LAST event, not its first.
-        copy_event = detail::copy_bytes_in_group(g, s.q, dst.get(), src.data(),
-                                                  n * sizeof(int), {});
-        g.submit_host([other] { other[0] = 5; });
+    const int seven = 7;
+    const auto events = s.q.submit_group([&](queue::group& g) {
+        g.submit([&](sycl::handler& h) { h.single_task([=] { p[1] = p[0] * 10; }); });
+        g.memcpy(p + 2, p, sizeof(int));
+        g.fill(p + 3, seven, 1);
     });
+    REQUIRE(events.size() == 3);
 
-    REQUIRE(events.size() == 2);
-
-    // Waiting on the contributed event alone is enough for the copy to have
-    // landed: it is the chain's last leg, and the legs are in order.
-    copy_event.wait();
-    REQUIRE(slabkit_test::read_back(s.q, dst.get(), n) == src);
-
+    // After the group: every subtask's write is visible, whichever order they
+    // ran in. 20 + 2 + 7 = 29, and no other value is reachable.
+    s.q.single_task([=] { p[0] = p[1] + p[2] + p[3]; });
     s.q.wait();
-    REQUIRE(other[0] == 5);
-    s.release(other);
+
+    REQUIRE(p[0] == 29);
+    s.release(p);
+}
+
+TEST_CASE("a group's subtasks do not wait for each other", "[host]") {
+    Stream s;
+
+    const auto ms = std::chrono::milliseconds{200};
+    auto       ran = std::make_shared<std::atomic<int>>(0);
+
+    const auto before = std::chrono::steady_clock::now();
+    s.q.submit_group([&](queue::group& g) {
+        for (int i = 0; i < 3; ++i)
+            g.async_host([ran, ms] {
+                std::this_thread::sleep_for(ms);
+                ran->fetch_add(1);
+            });
+    });
+    s.q.wait();
+    const auto elapsed = std::chrono::steady_clock::now() - before;
+
+    REQUIRE(ran->load() == 3);
+    REQUIRE(elapsed < 2 * ms);
+}
+
+TEST_CASE("an empty group leaves the stream's order alone", "[host]") {
+    Stream s;
+
+    int* p = s.alloc_host(1);
+    p[0]   = 1;
+
+    s.q.single_task([=] { p[0] = p[0] * 10; });
+    const auto events = s.q.submit_group([](queue::group&) {});
+    REQUIRE(events.empty());
+    s.q.single_task([=] { p[0] = p[0] + 1; });
+    s.q.wait();
+
+    REQUIRE(p[0] == 11);
+    s.release(p);
 }
 
 // -----------------------------------------------------------------------------
-// 7. the original defect: a cross-backend routed copy
+// 6. a placed in-order host task
 // -----------------------------------------------------------------------------
 
-TEST_CASE("a routed copy across backends is right every time", "[host][cross-device]") {
-    context ctx{slabkit_test::all_devices()};
-    queue   q{ctx};
-    if (ctx.backends().size() < 2) return;
+TEST_CASE("an in-order host task placed on a device keeps the stream's order", "[host]") {
+    Stream s;
 
-    const sycl::device first = ctx.devices().front();
-    sycl::device       other = first;
-    for (const auto& d : ctx.devices())
-        if (!(d.get_platform() == first.get_platform())) other = d;
+    int* p = s.alloc_host(1);
+    p[0]   = 1;
 
-    const std::size_t n = 16;
+    s.q.single_task(s.dev, [=] { p[0] = p[0] + 1; });
+    s.q.async_host_in_order(s.dev, [p] { p[0] = p[0] * 10; });
+    s.q.single_task(s.dev, [=] { p[0] = p[0] + 1; });
+    s.q.wait();
 
-    auto src = sk::malloc_device<int>(n, q, first);
-    auto dst = sk::malloc_device<int>(n, q, other);
-    REQUIRE(src);
-    REQUIRE(dst);
-
-    int* p = src.get();
-
-    for (int round = 0; round < 40; ++round) {
-        const unsigned mark     = 0xB0u + static_cast<unsigned>(round);
-        const int      expected = static_cast<int>(churn(mark, 200000));
-
-        // A producer on the first backend that cannot be optimized away, so the
-        // copy after it is genuinely racing something.
-        q.parallel_for(first, sycl::range<1>{n}, [=](sycl::id<1> i) {
-            unsigned acc = mark;
-            for (int spin = 0; spin < 200000; ++spin) acc = acc * 1103515245u + 12345u;
-            p[i[0]] = static_cast<int>(acc);
-        });
-
-        // The routed copy: one host item, ordered behind the producer by the
-        // interlock, issuing its legs only once that ordering is satisfied.
-        sk::memcpy(q, dst.get(), src.get(), n * sizeof(int));
-        q.wait();
-
-        const auto back = slabkit_test::read_back(q, other, dst.get(), n);
-        for (int v : back) REQUIRE(v == expected);
-    }
+    REQUIRE(p[0] == 21);
+    s.release(p);
 }

@@ -11,7 +11,7 @@ add_sycl_executable(slabkit_tests
     test_queue.cpp
     test_host_work.cpp
     test_kinds.cpp
-    test_mirrors.cpp
+    test_memory.cpp
     test_allocator.cpp
     test_usm_vector.cpp
     test_handles.cpp

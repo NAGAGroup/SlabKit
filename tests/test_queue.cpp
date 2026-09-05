@@ -1,15 +1,14 @@
 // =============================================================================
-// test_queue.cpp — one in-order stream, groups, and the host pool
+// test_queue.cpp — kernel tasks, placement and groups
 // =============================================================================
 //
 // The three properties worth proving here are the ones a caller would otherwise
 // have to take on trust:
 //
-//   1. placing an item on a device does not cost the in-order contract,
-//   2. a group's members do not depend on each other, and the next item depends
-//      on all of them,
-//   3. host work runs off the caller's thread, after work it chose to wait on,
-//      and may itself submit to the stream.
+//   1. placing a task on a device does not cost the in-order contract,
+//   2. a group's subtasks do not depend on each other, and the task after the
+//      group depends on all of them,
+//   3. the order holds across backends, which is where it used to break.
 
 #include <chrono>
 #include <cstddef>
@@ -228,12 +227,9 @@ inline unsigned churn(unsigned seed, int rounds) {
 }
 
 TEST_CASE("the stream's order holds ACROSS backends", "[queue]") {
-    // The regression test for the finding that shaped this class. A copy whose
-    // host operand is not USM in the issuing queue's context has that operand
-    // read when the copy is ISSUED, so a dependency cannot protect it: with no
-    // host wait at the transition this shape is wrong 40 times in 40. The stream
-    // buys the edge back with a host-side wait before every cross-backend KERNEL
-    // submission; this is what proves it stays bought.
+    // Forty rounds of the shape that used to be wrong forty times in forty: a
+    // producer on one backend, a copy out through pageable host memory, and a
+    // copy back in on another backend, ordered by nothing but the stream.
     context ctx{slabkit_test::all_devices()};
     queue   q{ctx};
     if (ctx.backends().size() < 2) return;
@@ -284,9 +280,9 @@ TEST_CASE("get_wait_list reports the stream's outstanding work", "[queue]") {
     int* p = s.alloc(1);
     s.q.single_task([=] { p[0] = 1; });
 
-    // The union over the internal queues -- the backend pair and the host lane.
-    // On an in-order queue AdaptiveCpp returns at most one event per queue, and
-    // nothing here has posted host work.
+    // The union over the three internal queues. On an in-order queue
+    // AdaptiveCpp returns at most one event, and nothing here has posted
+    // host or memory work.
     const auto list = s.q.get_wait_list();
     REQUIRE(list.size() <= 3);
 

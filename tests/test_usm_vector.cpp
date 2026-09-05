@@ -210,6 +210,40 @@ TEST_CASE("reserve and shrink_to_fit keep the elements", "[usm_vector]") {
     f.q.wait();
 }
 
+TEST_CASE("two mutations of one container are ordered by its own last event",
+          "[usm_vector]") {
+    Fixture f;
+
+    // Memory tasks are asynchronous with each other, so only the container's
+    // self-edge orders these two. The first is large enough to still be running
+    // when the second is submitted; without the edge some elements keep the 5.
+    const std::size_t n = 1u << 20;
+    usm_vector<int>   v{n, alloc_of(f, kind::shared)};
+
+    v.fill(5);
+    v.from_host(std::span<const int>{std::vector<int>(n, 7)});
+
+    const auto view = v.host_view();
+    REQUIRE(view.size() == n);
+    for (std::size_t i = 0; i < n; ++i) REQUIRE(view[i] == 7);
+}
+
+TEST_CASE("a container syncs what it did, and the caller syncs what they did",
+          "[usm_vector]") {
+    Fixture         f;
+    usm_vector<int> v{16, 1, alloc_of(f, kind::device)};
+
+    // The caller's kernel is ordered after the container's fill by last_event.
+    // The container never learns about that kernel, so sync() alone would not
+    // wait for it: the caller's own wait is what makes the value readable.
+    int* p = v.data();
+    f.q.parallel_for(std::vector<sycl::event>{v.last_event()}, sycl::range<1>{16},
+                     [=](sycl::id<1> i) { p[i[0]] = p[i[0]] * 10; });
+    f.q.wait_and_throw();
+
+    for (int x : v.host_view()) REQUIRE(x == 10);
+}
+
 TEST_CASE("a container's elements are visible to a kernel on its own stream",
           "[usm_vector]") {
     Fixture         f;
