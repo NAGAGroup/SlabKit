@@ -38,18 +38,15 @@
 // A MEMORY TASK TAKES THE ROUTE ITS OPERANDS ALLOW: a direct backend copy when
 // they meet on one device, a host memcpy when both are host-reachable, and a
 // staged pair of copies through a host intermediate when they are in different
-// contexts. A named device is where the operation is ISSUED when the route
-// leaves that free; a device operand always decides its own leg.
+// contexts. The route decides HOW; a named device decides WHERE the operation
+// is issued, and placing it validly is the caller's. Without one, the device
+// operand decides.
 //
-// A SUBMISSION TO A DEVICE THAT IS NOT THE OPENMP ONE never carries a
-// dependency on outstanding OpenMP work: that edge is paid with a host wait,
-// and only a stream whose context spans backends ever pays it. A kernel
-// submitted with such a dependency does not return.
-//
-// wait() and wait_and_throw() are the global syncs. Destroying the last handle
-// also drains, because a host task must not outlive the stream: one that runs
-// during the runtime's shutdown -- an allocator's deferred release, typically
-// -- frees memory through structures that are already gone.
+// wait() and wait_and_throw() are the global syncs, and one of them is the
+// LAST thing a program does with its queue before shutdown, as with any
+// sycl::queue: work still running at program exit is illegal and dies
+// ungracefully. Destruction does not drain -- the queues carry their
+// submitted work out, as sycl queues do.
 //
 // THREAD SAFETY. Every member is safe to call from any thread.
 

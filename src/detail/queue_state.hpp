@@ -47,17 +47,6 @@ class QueueState {
 public:
     QueueState(context ctx, const sycl::device* dev, sycl::async_handler handler);
 
-    /// Destroying the LAST handle drains the stream. Not a wait for the sake of
-    /// ordering -- the queues carry their own work out -- but for the sake of
-    /// the tasks' own lifetime: a host task outlives the stream otherwise, and
-    /// a deferred release that runs during the runtime's shutdown frees memory
-    /// through structures that are already gone (measured: 7 crashes in 25 runs
-    /// of a container going out of scope with its release enqueued).
-    ///
-    /// Nothing slabkit submits holds a queue handle, so this can never be a
-    /// task waiting on itself.
-    ~QueueState();
-
     QueueState(const QueueState&)            = delete;
     QueueState& operator=(const QueueState&) = delete;
 

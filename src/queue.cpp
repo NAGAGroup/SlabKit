@@ -45,24 +45,6 @@ void append(std::vector<sycl::event>& into, const std::vector<sycl::event>* from
     if (from) into.insert(into.end(), from->begin(), from->end());
 }
 
-void wait_all(const std::vector<sycl::event>& events) {
-    for (const sycl::event& e : events) sycl::event{e}.wait();
-}
-
-/// THE CROSS-BACKEND TRANSITION. A submission to a device that is not the
-/// OpenMP one never carries a dependency on OpenMP work that is still
-/// outstanding: measured on the naga fork, a CUDA kernel submitted with such a
-/// dependency never returns from submit (0 of 3 rounds, in-order retargetable,
-/// out-of-order retargetable and two device-bound queues alike), and the same
-/// submission after a host wait returns in under 70 ms. So a stream whose
-/// context spans backends pays that edge with a host wait here.
-///
-/// A host task is not affected in either direction: a kernel may depend on one,
-/// and it may depend on a kernel.
-bool crosses_backends(const QueueState& st, const sycl::device& target) {
-    return st.ctx.backends().size() > 1 && !is_host_backend(target);
-}
-
 }  // namespace
 
 // -----------------------------------------------------------------------------
@@ -93,16 +75,6 @@ QueueState::QueueState(context c, const sycl::device* dev, sycl::async_handler h
     if (dev && !ctx.contains(*dev))
         throw std::invalid_argument{
             "naga::slabkit::queue: the default device is not in this queue's context"};
-}
-
-QueueState::~QueueState() {
-    try {
-        primary.wait();
-        group_queue.wait();
-        host_queue.wait();
-        legs.wait();
-    } catch (...) {  // NOLINT: a destructor reports nothing
-    }
 }
 
 const sycl::device& QueueState::device_or_default(const sycl::device* dev) const {
@@ -157,13 +129,6 @@ submission begin_item(QueueState& st, lane l, const sycl::device* dev,
     }
 
     append(s.deps, extra);
-
-    if (crosses_backends(st, target)) {
-        wait_all(s.deps);
-        // The in-order queue states its own predecessor internally, so that
-        // edge has to be settled here too.
-        if (l == lane::primary) wait_all(st.primary.get_wait_list());
-    }
     return s;
 }
 
@@ -182,8 +147,6 @@ submission begin_group_item(GroupState& gs, const sycl::device* dev,
     s.props  = gs.state.place(dev);
     s.deps   = gs.captured;
     append(s.deps, extra);
-
-    if (crosses_backends(gs.state, gs.state.device_or_default(dev))) wait_all(s.deps);
     return s;
 }
 
@@ -290,11 +253,13 @@ sycl::event copy_on(const Sink& s, const sycl::device* dev, void* dst, const voi
         return e;
     }
 
-    // One backend copy, issued where the device operand lives. A host operand
-    // of it is read when the copy RUNS, which is SYCL's own contract for
-    // queue::memcpy: the caller owns that memory until the event completes.
+    // One backend copy. A named device is where it is ISSUED -- placing it
+    // validly is the caller's -- and the device operand decides otherwise. A
+    // host operand is read when the copy RUNS, which is SYCL's own contract
+    // for queue::memcpy: the caller owns that memory until the event
+    // completes.
     if (from.host_side || to.host_side || direct_between(from, to)) {
-        const sycl::device& on  = to.host_side ? from.dev : to.dev;
+        const sycl::device& on  = dev ? *dev : (to.host_side ? from.dev : to.dev);
         submission          sub = s.begin(&on, extra);
         sycl::event         e   = sub.target->submit(sub.props, [&](sycl::handler& h) {
             h.depends_on(sub.deps);
@@ -343,8 +308,9 @@ sycl::event set_on(const Sink& s, const sycl::device* dev, void* p, int value,
         return e;
     }
 
-    submission  sub = s.begin(&o.dev, extra);
-    sycl::event e   = sub.target->submit(sub.props, [&](sycl::handler& h) {
+    const sycl::device& on  = dev ? *dev : o.dev;
+    submission          sub = s.begin(&on, extra);
+    sycl::event         e   = sub.target->submit(sub.props, [&](sycl::handler& h) {
         h.depends_on(sub.deps);
         h.memset(p, value, bytes);
     });
@@ -396,7 +362,8 @@ sycl::event fill_on(const Sink& s, const sycl::device* dev, void* p, const void*
         std::uint64_t packed = 0;
         std::memcpy(&packed, pat, psize);
 
-        submission  sub = s.begin(&o.dev, extra);
+        const sycl::device& on  = dev ? *dev : o.dev;
+        submission          sub = s.begin(&on, extra);
         sycl::event e   = sub.target->submit(sub.props, [&](sycl::handler& h) {
             h.depends_on(sub.deps);
             h.parallel_for(sycl::range<1>{total}, [=](sycl::id<1> i) {
