@@ -1,64 +1,70 @@
 #pragma once
 
 // =============================================================================
-// naga/slabkit/queue.hpp — one stream of work over a context
+// naga/slabkit/queue.hpp — one in-order stream of work over a context
 // =============================================================================
 //
-// sycl::queue's surface, with one stream semantics that hold ACROSS backends.
+// sycl::queue's surface, device-agnostic and in order across backends. Three
+// kinds of submission:
 //
-// TWO KINDS OF WORK. Kernel work is what runs on a device. Host work is what
-// runs on the host -- including every memory operation, since a copy is
-// host-issued. Kernel work is in order with kernel work; host work is PARALLEL
-// with other host work; the two interlock, so all outstanding host work
-// completes before any kernel work begins and all outstanding kernel work
-// completes before any host work begins. The stream alternates phases, each
-// internally parallel, and behaves in order from outside.
+//   KERNEL TASKS       submit, single_task, parallel_for
+//   HOST/MEMORY TASKS  async_host, memcpy, copy, memset, fill
+//   GROUP TASKS        submit_group
 //
-// A GROUP opts out of the interlock: its members depend on the step before it
-// and on none of each other, whatever kind they are. A CHAIN is the opposite --
-// host items forced in order with each other, counting as ONE host item to the
-// stream. A staged copy is exactly that.
+// Kernel tasks run in the order they were submitted. Host/memory tasks are
+// asynchronous with respect to each other and ordered against kernel tasks and
+// group tasks in both directions. A group's subtasks -- any mix of the two
+// kinds -- are unordered among themselves and are ONE task to everything
+// outside the group. The _in_order variant of a host/memory task joins the
+// kernel order instead.
 //
-// INTERNALLY, per backend of the context and created lazily: one in-order and
-// one out-of-order sycl::queue, both AdaptiveCpp_retargetable, on that backend's
-// default context. Plus one out-of-order HOST LANE on the OpenMP backend, which
-// always exists.
+// INTERNALLY three retargetable sycl::queues, none bound to a device by
+// construction: an in-order PRIMARY, an out-of-order GROUP queue and an
+// out-of-order HOST/MEMORY queue. Every submission names its device and that
+// device's context through AdaptiveCpp_retarget, which is what lets one stream
+// span backends.
 //
-// HOST WORK IS AN OPENMP single_task whose body is an INDIRECT call through a
-// function pointer into ordinary host code -- the host task AdaptiveCpp never
-// gave us. A direct call to complex host code from a kernel fails the generic
-// flow's JIT; an indirect call does not, and the two captured values (a function
-// pointer and a void*) are trivially copyable, which kernel captures must be.
+// ORDERING IS BY MERGING WAIT LISTS at submission time, never by waiting. The
+// primary merges the group and host/memory queues; a group merges all three,
+// itself included, when it OPENS, and every subtask carries that set; a
+// host/memory task merges the primary and the group queue and never the
+// host/memory queue itself.
 //
-// ORDERING ACROSS BACKENDS is by depends_on, and it holds, because the consumer
-// of every cross-backend dependency is the host lane, which honours foreign
-// events. slabkit never submits a NON-OpenMP operation carrying a dependency on
-// another backend's event: those edges are paid with a host wait before the
-// submission. That restriction is load-bearing. A copy whose host operand is not
-// USM in the issuing queue's context has that operand read when the copy is
-// ISSUED -- the driver stages pageable memory through a pinned buffer at issue
-// time -- so a stream-level dependency cannot protect it, and was measured wrong
-// 40 times in 40, indistinguishable from no dependency at all.
+// ORDERING BETWEEN TWO HOST/MEMORY TASKS IS THE CALLER'S: pass the first one's
+// event to the second, or use the _in_order variants. Raw pointers are the
+// caller's too -- a task orders itself against the stream, not against the
+// bytes it names.
 //
-// WHAT A HOST TASK MUST NOT DO. It must never submit work to the OpenMP backend
-// and wait on it: the wait holds the very lane the submitted work needs, and
-// nothing completes. Work on other backends may be issued and waited freely. For
-// the same reason a host task must not hold the LAST handle to its own stream:
-// the stream's destructor drains the host lane, and draining it from a task
-// running on it is that same self-wait.
+// A MEMORY TASK TAKES THE ROUTE ITS OPERANDS ALLOW: a direct backend copy when
+// they meet on one device, a host memcpy when both are host-reachable, and a
+// staged pair of copies through a host intermediate when they are in different
+// contexts. A named device is where the operation is ISSUED when the route
+// leaves that free; a device operand always decides its own leg.
 //
-// THREAD SAFETY. Every member is safe to call from any thread: one internal
-// mutex guards the backend-pair map and the stream's step state, and it is never
-// held while waiting on or submitting to a sycl::queue.
+// A SUBMISSION TO A DEVICE THAT IS NOT THE OPENMP ONE never carries a
+// dependency on outstanding OpenMP work: that edge is paid with a host wait,
+// and only a stream whose context spans backends ever pays it. A kernel
+// submitted with such a dependency does not return.
+//
+// wait() and wait_and_throw() are the global syncs. Destroying the last handle
+// also drains, because a host task must not outlive the stream: one that runs
+// during the runtime's shutdown -- an allocator's deferred release, typically
+// -- frees memory through structures that are already gone.
+//
+// THREAD SAFETY. Every member is safe to call from any thread.
 
 #include <cstddef>
+#include <exception>
 #include <memory>
-#include <mutex>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <sycl/sycl.hpp>
+
+#ifndef ACPP_EXT_ASYNC_HOST
+#error "slabkit needs an AdaptiveCpp with the async_host extension (ACPP_EXT_ASYNC_HOST)"
+#endif
 
 #include "naga/slabkit/context.hpp"
 
@@ -69,114 +75,100 @@ class queue;
 namespace detail {
 
 class QueueState;
+class GroupState;
+class HostErrors;
 
-/// An event, and the index of the backend it ran on. The stream has to remember
-/// the backend because a NON-OpenMP consumer cannot be handed a foreign event.
-using annotated_event = std::pair<sycl::event, std::size_t>;
+/// Which of the stream's three queues a task goes to.
+enum class lane : unsigned char { primary, host_mem };
 
-/// Everything a kernel submission needs, resolved under the state mutex and
-/// handed back before anything is submitted.
-///
-/// `deps` are same-backend and go to depends_on. `host_waits` are the ones from
-/// ANOTHER backend, which are waited on the host BEFORE submitting -- the price
-/// of the restriction above, paid only at a transition.
+/// Everything a submission needs, resolved before anything is submitted: the
+/// queue to submit to, the merged dependencies, and the placement.
 struct submission {
-    sycl::queue*             target;
-    std::size_t              backend;
+    sycl::queue*             target = nullptr;
     std::vector<sycl::event> deps;
-    std::vector<sycl::event> host_waits;
+    sycl::property_list      props{};
 };
 
-/// A type-erased host callable: run it, then destroy it. Neither pointer is ever
-/// seen by a kernel; only the trampoline's own address is.
-struct HostFn {
-    void (*run)(void*);
-    void (*destroy)(void*);
-    void* payload;
+std::shared_ptr<QueueState> make_queue_state(context ctx, const sycl::device* dev,
+                                             sycl::async_handler handler);
+
+submission begin_item(QueueState& st, lane l, const sycl::device* dev,
+                      const std::vector<sycl::event>* extra);
+submission begin_group_item(GroupState& gs, const sycl::device* dev,
+                            const std::vector<sycl::event>* extra);
+void       record_group_event(GroupState& gs, const sycl::event& e);
+
+std::shared_ptr<GroupState> open_group(QueueState& st);
+std::vector<sycl::event>    group_events(const GroupState& gs);
+
+// ---- memory work, compiled --------------------------------------------------
+
+sycl::event copy_bytes(QueueState& st, lane l, const sycl::device* dev, void* dst,
+                       const void* src, std::size_t bytes,
+                       const std::vector<sycl::event>* extra);
+sycl::event copy_bytes(GroupState& gs, const sycl::device* dev, void* dst, const void* src,
+                       std::size_t bytes, const std::vector<sycl::event>* extra);
+
+sycl::event set_bytes(QueueState& st, lane l, const sycl::device* dev, void* p, int value,
+                      std::size_t bytes, const std::vector<sycl::event>* extra);
+sycl::event set_bytes(GroupState& gs, const sycl::device* dev, void* p, int value,
+                      std::size_t bytes, const std::vector<sycl::event>* extra);
+
+sycl::event fill_bytes(QueueState& st, lane l, const sycl::device* dev, void* p,
+                       const void* pattern, std::size_t pattern_size, std::size_t count,
+                       const std::vector<sycl::event>* extra);
+sycl::event fill_bytes(GroupState& gs, const sycl::device* dev, void* p, const void* pattern,
+                       std::size_t pattern_size, std::size_t count,
+                       const std::vector<sycl::event>* extra);
+
+// ---- host callables ---------------------------------------------------------
+
+/// The stream's asynchronous-error list, which outlives the stream: a host
+/// callable holds one and reports into it from whatever thread ran it.
+std::shared_ptr<HostErrors> errors_of(QueueState& st);
+void                        record_error(HostErrors& errors, std::exception_ptr e);
+
+/// A user callable made copyable and non-throwing, which is what the runtime's
+/// host operations require of one. An escaping exception is asynchronous: it
+/// surfaces from wait_and_throw or throw_asynchronous.
+template <class F>
+class guarded_host_fn {
+public:
+    guarded_host_fn(std::shared_ptr<HostErrors> errors, F&& f)
+        : errors_{std::move(errors)}, fn_{std::make_shared<F>(std::move(f))} {}
+
+    void operator()() const {
+        try {
+            (*fn_)();
+        } catch (...) {
+            record_error(*errors_, std::current_exception());
+        }
+    }
+
+private:
+    std::shared_ptr<HostErrors> errors_;
+    std::shared_ptr<F>          fn_;
 };
 
 template <class F>
-HostFn make_host_fn(F&& f) {
-    using Fn = std::decay_t<F>;
-    return HostFn{+[](void* p) { (*static_cast<Fn*>(p))(); },
-                  +[](void* p) { delete static_cast<Fn*>(p); }, new Fn(std::forward<F>(f))};
+auto guard_host(QueueState& st, F&& f) {
+    return guarded_host_fn<std::decay_t<F>>{errors_of(st), std::decay_t<F>{std::forward<F>(f)}};
 }
-
-/// The deps a group's members share, split by kind: kernel members wait for
-/// both, host members wait for the kernel side only, because a host item must
-/// never depend on another host item.
-struct group_deps {
-    std::vector<annotated_event> kernel;
-    std::vector<sycl::event>     host;
-};
-
-/// A chain's cursor. Each `then` waits only for the item before it.
-struct ChainState {
-    QueueState*              st = nullptr;
-    std::vector<sycl::event> deps;
-    sycl::event              last;
-    bool                     started = false;
-};
-
-std::shared_ptr<QueueState> make_queue_state(context ctx, sycl::async_handler handler);
-
-/// \param dev nullptr for the stream's default device.
-/// \param concurrent true selects the backend's out-of-order queue (groups).
-submission begin_item(QueueState& st, const sycl::device* dev, bool concurrent);
-
-/// The same, for a kernel member of a group: the deps are the group's, not the
-/// stream's, and they include the host side, because a group opts its MEMBERS
-/// out of the interlock, not the group itself.
-submission begin_group_item(QueueState& st, const sycl::device* dev, const group_deps& deps);
-
-/// Record `e`, run on backend `b`, as the whole of the current kernel step.
-void end_item(QueueState& st, const sycl::event& e, std::size_t b);
-
-group_deps begin_group(QueueState& st);
-void       end_group(QueueState& st, std::vector<annotated_event> kernel_events,
-                     std::vector<sycl::event> host_events);
-
-/// One host item of the stream: ordered after the outstanding kernel work,
-/// parallel with every other host item.
-sycl::event submit_host_item(QueueState& st, HostFn fn);
-
-/// One host item of a group: ordered after the group's kernel deps only.
-sycl::event submit_group_host_item(QueueState& st, const std::vector<annotated_event>& deps,
-                                   HostFn fn);
-
-/// Record an already-submitted host event as one outstanding host item of the
-/// stream. A chain's last event is the only thing that reaches this.
-void register_host_item(QueueState& st, const sycl::event& e);
-
-ChainState  begin_chain(QueueState& st);
-ChainState  begin_chain_with(QueueState& st, std::vector<annotated_event> kernel_deps);
-sycl::event chain_then(ChainState& cs, HostFn fn);
-/// Guarantees the chain has at least one item and returns its last event.
-sycl::event finish_chain(ChainState& cs);
 
 const context&      state_context(const QueueState& st);
 const sycl::device& state_device(const QueueState& st);
+QueueState&         state_of_group(GroupState& gs);
 
 void                     state_wait(QueueState& st);
 void                     state_wait_and_throw(QueueState& st);
-void                     state_sync_host(QueueState& st);
-void                     state_sync_host_and_throw(QueueState& st);
 void                     state_throw_asynchronous(QueueState& st);
 std::vector<sycl::event> state_wait_list(QueueState& st);
 
-/// The stream behind a handle. Internal: the routed mirrors need the backend
-/// queues, which the public surface deliberately does not expose.
+/// The stream behind a handle. Internal: the compiled core takes the state,
+/// which the public surface deliberately does not expose.
 QueueState& state_of(const queue& q);
 
-/// The backend queue for `dev`, as a copy a host task may hold: the one way
-/// host work reaches a device without going through the stream's ordering. A
-/// host task must NOT hold the slabkit queue instead -- dropping the last handle
-/// from inside a task would make the stream's destructor drain the very lane it
-/// is running on.
-sycl::queue backend_queue_for(QueueState& st, const sycl::device& dev);
-
-/// True when `dev` belongs to the OpenMP backend -- the one backend a host task
-/// may not submit to and wait on.
+/// True when `dev` belongs to the OpenMP backend.
 bool is_host_backend(const sycl::device& dev);
 
 /// The device of an AdaptiveCpp_retarget property, if the list carries one.
@@ -186,7 +178,13 @@ bool retarget_device(const sycl::property_list& props, sycl::device& out);
 
 class queue {
 public:
-    explicit queue(context ctx, sycl::async_handler handler = {});
+    explicit queue(context ctx, sycl::async_handler handler = {})
+        : state_{detail::make_queue_state(std::move(ctx), nullptr, std::move(handler))} {}
+
+    /// The same stream with `dev` as its default device, which every unplaced
+    /// task runs on. \throws std::invalid_argument if `dev` is not in `ctx`.
+    queue(context ctx, const sycl::device& dev, sycl::async_handler handler = {})
+        : state_{detail::make_queue_state(std::move(ctx), &dev, std::move(handler))} {}
 
     const context&      get_context() const { return detail::state_context(*state_); }
     const sycl::device& get_device() const { return detail::state_device(*state_); }
@@ -203,30 +201,30 @@ public:
 
     template <class CGF>
     sycl::event submit(CGF&& cgf) {
-        return enqueue(nullptr, nullptr, std::forward<CGF>(cgf));
+        return kernel(nullptr, nullptr, std::forward<CGF>(cgf));
     }
 
     template <class CGF>
     sycl::event submit(const sycl::property_list& props, CGF&& cgf) {
         sycl::device dev;
         if (detail::retarget_device(props, dev))
-            return enqueue(&dev, nullptr, std::forward<CGF>(cgf));
-        return enqueue(nullptr, nullptr, std::forward<CGF>(cgf));
+            return kernel(&dev, nullptr, std::forward<CGF>(cgf));
+        return kernel(nullptr, nullptr, std::forward<CGF>(cgf));
     }
 
     template <class CGF>
     sycl::event submit(const sycl::device& dev, CGF&& cgf) {
-        return enqueue(&dev, nullptr, std::forward<CGF>(cgf));
+        return kernel(&dev, nullptr, std::forward<CGF>(cgf));
     }
 
     template <class CGF>
     sycl::event submit(const std::vector<sycl::event>& deps, CGF&& cgf) {
-        return enqueue(nullptr, &deps, std::forward<CGF>(cgf));
+        return kernel(nullptr, &deps, std::forward<CGF>(cgf));
     }
 
     template <class CGF>
     sycl::event submit(const sycl::device& dev, const std::vector<sycl::event>& deps, CGF&& cgf) {
-        return enqueue(&dev, &deps, std::forward<CGF>(cgf));
+        return kernel(&dev, &deps, std::forward<CGF>(cgf));
     }
 
     // -------------------------------------------------------------------------
@@ -235,20 +233,24 @@ public:
 
     template <class K>
     sycl::event single_task(const K& k) {
-        return body(nullptr, nullptr, [&](sycl::handler& h) { h.single_task(k); });
+        return body(detail::lane::primary, nullptr, nullptr,
+                    [&](sycl::handler& h) { h.single_task(k); });
     }
     template <class K>
     sycl::event single_task(const sycl::device& dev, const K& k) {
-        return body(&dev, nullptr, [&](sycl::handler& h) { h.single_task(k); });
+        return body(detail::lane::primary, &dev, nullptr,
+                    [&](sycl::handler& h) { h.single_task(k); });
     }
     template <class K>
     sycl::event single_task(const std::vector<sycl::event>& deps, const K& k) {
-        return body(nullptr, &deps, [&](sycl::handler& h) { h.single_task(k); });
+        return body(detail::lane::primary, nullptr, &deps,
+                    [&](sycl::handler& h) { h.single_task(k); });
     }
     template <class K>
     sycl::event single_task(const sycl::device& dev, const std::vector<sycl::event>& deps,
                             const K& k) {
-        return body(&dev, &deps, [&](sycl::handler& h) { h.single_task(k); });
+        return body(detail::lane::primary, &dev, &deps,
+                    [&](sycl::handler& h) { h.single_task(k); });
     }
 
     // -------------------------------------------------------------------------
@@ -259,103 +261,272 @@ public:
     // ---- range --------------------------------------------------------------
     template <class... RK, int Dim>
     sycl::event parallel_for(sycl::range<Dim> r, const RK&... rk) {
-        return body(nullptr, nullptr, [&](sycl::handler& h) { h.parallel_for(r, rk...); });
+        return body(detail::lane::primary, nullptr, nullptr,
+                    [&](sycl::handler& h) { h.parallel_for(r, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const sycl::device& dev, sycl::range<Dim> r, const RK&... rk) {
-        return body(&dev, nullptr, [&](sycl::handler& h) { h.parallel_for(r, rk...); });
+        return body(detail::lane::primary, &dev, nullptr,
+                    [&](sycl::handler& h) { h.parallel_for(r, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const std::vector<sycl::event>& deps, sycl::range<Dim> r,
                              const RK&... rk) {
-        return body(nullptr, &deps, [&](sycl::handler& h) { h.parallel_for(r, rk...); });
+        return body(detail::lane::primary, nullptr, &deps,
+                    [&](sycl::handler& h) { h.parallel_for(r, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const sycl::device& dev, const std::vector<sycl::event>& deps,
                              sycl::range<Dim> r, const RK&... rk) {
-        return body(&dev, &deps, [&](sycl::handler& h) { h.parallel_for(r, rk...); });
+        return body(detail::lane::primary, &dev, &deps,
+                    [&](sycl::handler& h) { h.parallel_for(r, rk...); });
     }
 
     // ---- range + offset ------------------------------------------------------
     template <class... RK, int Dim>
     sycl::event parallel_for(sycl::range<Dim> r, sycl::id<Dim> off, const RK&... rk) {
-        return body(nullptr, nullptr, [&](sycl::handler& h) { h.parallel_for(r, off, rk...); });
+        return body(detail::lane::primary, nullptr, nullptr,
+                    [&](sycl::handler& h) { h.parallel_for(r, off, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const sycl::device& dev, sycl::range<Dim> r, sycl::id<Dim> off,
                              const RK&... rk) {
-        return body(&dev, nullptr, [&](sycl::handler& h) { h.parallel_for(r, off, rk...); });
+        return body(detail::lane::primary, &dev, nullptr,
+                    [&](sycl::handler& h) { h.parallel_for(r, off, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const std::vector<sycl::event>& deps, sycl::range<Dim> r,
                              sycl::id<Dim> off, const RK&... rk) {
-        return body(nullptr, &deps, [&](sycl::handler& h) { h.parallel_for(r, off, rk...); });
+        return body(detail::lane::primary, nullptr, &deps,
+                    [&](sycl::handler& h) { h.parallel_for(r, off, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const sycl::device& dev, const std::vector<sycl::event>& deps,
                              sycl::range<Dim> r, sycl::id<Dim> off, const RK&... rk) {
-        return body(&dev, &deps, [&](sycl::handler& h) { h.parallel_for(r, off, rk...); });
+        return body(detail::lane::primary, &dev, &deps,
+                    [&](sycl::handler& h) { h.parallel_for(r, off, rk...); });
     }
 
     // ---- nd_range ------------------------------------------------------------
     template <class... RK, int Dim>
     sycl::event parallel_for(sycl::nd_range<Dim> nd, const RK&... rk) {
-        return body(nullptr, nullptr, [&](sycl::handler& h) { h.parallel_for(nd, rk...); });
+        return body(detail::lane::primary, nullptr, nullptr,
+                    [&](sycl::handler& h) { h.parallel_for(nd, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const sycl::device& dev, sycl::nd_range<Dim> nd, const RK&... rk) {
-        return body(&dev, nullptr, [&](sycl::handler& h) { h.parallel_for(nd, rk...); });
+        return body(detail::lane::primary, &dev, nullptr,
+                    [&](sycl::handler& h) { h.parallel_for(nd, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const std::vector<sycl::event>& deps, sycl::nd_range<Dim> nd,
                              const RK&... rk) {
-        return body(nullptr, &deps, [&](sycl::handler& h) { h.parallel_for(nd, rk...); });
+        return body(detail::lane::primary, nullptr, &deps,
+                    [&](sycl::handler& h) { h.parallel_for(nd, rk...); });
     }
     template <class... RK, int Dim>
     sycl::event parallel_for(const sycl::device& dev, const std::vector<sycl::event>& deps,
                              sycl::nd_range<Dim> nd, const RK&... rk) {
-        return body(&dev, &deps, [&](sycl::handler& h) { h.parallel_for(nd, rk...); });
+        return body(detail::lane::primary, &dev, &deps,
+                    [&](sycl::handler& h) { h.parallel_for(nd, rk...); });
     }
 
     // -------------------------------------------------------------------------
-    // Host work — on the host lane, off the caller's thread
+    // Host work — a callable on the runtime's own threads
     // -------------------------------------------------------------------------
 
-    /// One host item: it begins after the kernel work outstanding when it was
-    /// submitted, and runs in parallel with every other host item. The returned
-    /// event completes when the callable returns. An exception escaping the
-    /// callable is asynchronous: it surfaces from wait_and_throw,
-    /// sync_host_work_and_throw or throw_asynchronous, never from here.
     template <class F>
-    sycl::event submit_host(F&& f) {
-        return detail::submit_host_item(*state_, detail::make_host_fn(std::forward<F>(f)));
+    sycl::event async_host(F&& f) {
+        return host_call(detail::lane::host_mem, nullptr, nullptr, std::forward<F>(f));
+    }
+    template <class F>
+    sycl::event async_host(const sycl::device& dev, F&& f) {
+        return host_call(detail::lane::host_mem, &dev, nullptr, std::forward<F>(f));
+    }
+    template <class F>
+    sycl::event async_host(const std::vector<sycl::event>& deps, F&& f) {
+        return host_call(detail::lane::host_mem, nullptr, &deps, std::forward<F>(f));
+    }
+    template <class F>
+    sycl::event async_host(const sycl::device& dev, const std::vector<sycl::event>& deps, F&& f) {
+        return host_call(detail::lane::host_mem, &dev, &deps, std::forward<F>(f));
     }
 
-    /// Host items forced in order with each other: the opposite of a group. The
-    /// chain is ONE host item as far as the stream is concerned.
-    class chain {
-    public:
-        template <class F>
-        sycl::event then(F&& f) {
-            return detail::chain_then(*cs_, detail::make_host_fn(std::forward<F>(f)));
-        }
-
-    private:
-        friend class queue;
-        explicit chain(detail::ChainState& cs) : cs_{&cs} {}
-        detail::ChainState* cs_;
-    };
-
-    /// f(chain&). Returns the chain's LAST event, which is the item the stream
-    /// records.
     template <class F>
-    sycl::event submit_chain(F&& f) {
-        detail::ChainState cs = detail::begin_chain(*state_);
-        chain              c{cs};
-        f(c);
-        const sycl::event e = detail::finish_chain(cs);
-        detail::register_host_item(*state_, e);
-        return e;
+    sycl::event async_host_in_order(F&& f) {
+        return host_call(detail::lane::primary, nullptr, nullptr, std::forward<F>(f));
+    }
+    template <class F>
+    sycl::event async_host_in_order(const sycl::device& dev, F&& f) {
+        return host_call(detail::lane::primary, &dev, nullptr, std::forward<F>(f));
+    }
+    template <class F>
+    sycl::event async_host_in_order(const std::vector<sycl::event>& deps, F&& f) {
+        return host_call(detail::lane::primary, nullptr, &deps, std::forward<F>(f));
+    }
+    template <class F>
+    sycl::event async_host_in_order(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                                    F&& f) {
+        return host_call(detail::lane::primary, &dev, &deps, std::forward<F>(f));
+    }
+
+    // -------------------------------------------------------------------------
+    // Memory work — SYCL's spellings, over any pair of operands the context can
+    // locate. The _in_order variants join the kernel order.
+    // -------------------------------------------------------------------------
+
+    sycl::event memcpy(void* dst, const void* src, std::size_t bytes) {
+        return detail::copy_bytes(*state_, detail::lane::host_mem, nullptr, dst, src, bytes,
+                                  nullptr);
+    }
+    sycl::event memcpy(const sycl::device& dev, void* dst, const void* src, std::size_t bytes) {
+        return detail::copy_bytes(*state_, detail::lane::host_mem, &dev, dst, src, bytes,
+                                  nullptr);
+    }
+    sycl::event memcpy(const std::vector<sycl::event>& deps, void* dst, const void* src,
+                       std::size_t bytes) {
+        return detail::copy_bytes(*state_, detail::lane::host_mem, nullptr, dst, src, bytes,
+                                  &deps);
+    }
+    sycl::event memcpy(const sycl::device& dev, const std::vector<sycl::event>& deps, void* dst,
+                       const void* src, std::size_t bytes) {
+        return detail::copy_bytes(*state_, detail::lane::host_mem, &dev, dst, src, bytes, &deps);
+    }
+
+    sycl::event memcpy_in_order(void* dst, const void* src, std::size_t bytes) {
+        return detail::copy_bytes(*state_, detail::lane::primary, nullptr, dst, src, bytes,
+                                  nullptr);
+    }
+    sycl::event memcpy_in_order(const sycl::device& dev, void* dst, const void* src,
+                                std::size_t bytes) {
+        return detail::copy_bytes(*state_, detail::lane::primary, &dev, dst, src, bytes, nullptr);
+    }
+    sycl::event memcpy_in_order(const std::vector<sycl::event>& deps, void* dst, const void* src,
+                                std::size_t bytes) {
+        return detail::copy_bytes(*state_, detail::lane::primary, nullptr, dst, src, bytes,
+                                  &deps);
+    }
+    sycl::event memcpy_in_order(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                                void* dst, const void* src, std::size_t bytes) {
+        return detail::copy_bytes(*state_, detail::lane::primary, &dev, dst, src, bytes, &deps);
+    }
+
+    template <class T>
+    sycl::event copy(const T* src, T* dst, std::size_t count) {
+        return memcpy(dst, src, count * sizeof(T));
+    }
+    template <class T>
+    sycl::event copy(const sycl::device& dev, const T* src, T* dst, std::size_t count) {
+        return memcpy(dev, dst, src, count * sizeof(T));
+    }
+    template <class T>
+    sycl::event copy(const std::vector<sycl::event>& deps, const T* src, T* dst,
+                     std::size_t count) {
+        return memcpy(deps, dst, src, count * sizeof(T));
+    }
+    template <class T>
+    sycl::event copy(const sycl::device& dev, const std::vector<sycl::event>& deps, const T* src,
+                     T* dst, std::size_t count) {
+        return memcpy(dev, deps, dst, src, count * sizeof(T));
+    }
+
+    template <class T>
+    sycl::event copy_in_order(const T* src, T* dst, std::size_t count) {
+        return memcpy_in_order(dst, src, count * sizeof(T));
+    }
+    template <class T>
+    sycl::event copy_in_order(const sycl::device& dev, const T* src, T* dst, std::size_t count) {
+        return memcpy_in_order(dev, dst, src, count * sizeof(T));
+    }
+    template <class T>
+    sycl::event copy_in_order(const std::vector<sycl::event>& deps, const T* src, T* dst,
+                              std::size_t count) {
+        return memcpy_in_order(deps, dst, src, count * sizeof(T));
+    }
+    template <class T>
+    sycl::event copy_in_order(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                              const T* src, T* dst, std::size_t count) {
+        return memcpy_in_order(dev, deps, dst, src, count * sizeof(T));
+    }
+
+    sycl::event memset(void* p, int value, std::size_t bytes) {
+        return detail::set_bytes(*state_, detail::lane::host_mem, nullptr, p, value, bytes,
+                                 nullptr);
+    }
+    sycl::event memset(const sycl::device& dev, void* p, int value, std::size_t bytes) {
+        return detail::set_bytes(*state_, detail::lane::host_mem, &dev, p, value, bytes, nullptr);
+    }
+    sycl::event memset(const std::vector<sycl::event>& deps, void* p, int value,
+                       std::size_t bytes) {
+        return detail::set_bytes(*state_, detail::lane::host_mem, nullptr, p, value, bytes,
+                                 &deps);
+    }
+    sycl::event memset(const sycl::device& dev, const std::vector<sycl::event>& deps, void* p,
+                       int value, std::size_t bytes) {
+        return detail::set_bytes(*state_, detail::lane::host_mem, &dev, p, value, bytes, &deps);
+    }
+
+    sycl::event memset_in_order(void* p, int value, std::size_t bytes) {
+        return detail::set_bytes(*state_, detail::lane::primary, nullptr, p, value, bytes,
+                                 nullptr);
+    }
+    sycl::event memset_in_order(const sycl::device& dev, void* p, int value, std::size_t bytes) {
+        return detail::set_bytes(*state_, detail::lane::primary, &dev, p, value, bytes, nullptr);
+    }
+    sycl::event memset_in_order(const std::vector<sycl::event>& deps, void* p, int value,
+                                std::size_t bytes) {
+        return detail::set_bytes(*state_, detail::lane::primary, nullptr, p, value, bytes, &deps);
+    }
+    sycl::event memset_in_order(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                                void* p, int value, std::size_t bytes) {
+        return detail::set_bytes(*state_, detail::lane::primary, &dev, p, value, bytes, &deps);
+    }
+
+    template <class T>
+    sycl::event fill(void* p, const T& pattern, std::size_t count) {
+        return detail::fill_bytes(*state_, detail::lane::host_mem, nullptr, p, &pattern,
+                                  sizeof(T), count, nullptr);
+    }
+    template <class T>
+    sycl::event fill(const sycl::device& dev, void* p, const T& pattern, std::size_t count) {
+        return detail::fill_bytes(*state_, detail::lane::host_mem, &dev, p, &pattern, sizeof(T),
+                                  count, nullptr);
+    }
+    template <class T>
+    sycl::event fill(const std::vector<sycl::event>& deps, void* p, const T& pattern,
+                     std::size_t count) {
+        return detail::fill_bytes(*state_, detail::lane::host_mem, nullptr, p, &pattern,
+                                  sizeof(T), count, &deps);
+    }
+    template <class T>
+    sycl::event fill(const sycl::device& dev, const std::vector<sycl::event>& deps, void* p,
+                     const T& pattern, std::size_t count) {
+        return detail::fill_bytes(*state_, detail::lane::host_mem, &dev, p, &pattern, sizeof(T),
+                                  count, &deps);
+    }
+
+    template <class T>
+    sycl::event fill_in_order(void* p, const T& pattern, std::size_t count) {
+        return detail::fill_bytes(*state_, detail::lane::primary, nullptr, p, &pattern, sizeof(T),
+                                  count, nullptr);
+    }
+    template <class T>
+    sycl::event fill_in_order(const sycl::device& dev, void* p, const T& pattern,
+                              std::size_t count) {
+        return detail::fill_bytes(*state_, detail::lane::primary, &dev, p, &pattern, sizeof(T),
+                                  count, nullptr);
+    }
+    template <class T>
+    sycl::event fill_in_order(const std::vector<sycl::event>& deps, void* p, const T& pattern,
+                              std::size_t count) {
+        return detail::fill_bytes(*state_, detail::lane::primary, nullptr, p, &pattern, sizeof(T),
+                                  count, &deps);
+    }
+    template <class T>
+    sycl::event fill_in_order(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                              void* p, const T& pattern, std::size_t count) {
+        return detail::fill_bytes(*state_, detail::lane::primary, &dev, p, &pattern, sizeof(T),
+                                  count, &deps);
     }
 
     // -------------------------------------------------------------------------
@@ -364,149 +535,192 @@ public:
 
     void wait() { detail::state_wait(*state_); }
     void wait_and_throw() { detail::state_wait_and_throw(*state_); }
-    void sync_host_work() { detail::state_sync_host(*state_); }
-    void sync_host_work_and_throw() { detail::state_sync_host_and_throw(*state_); }
     void throw_asynchronous() { detail::state_throw_asynchronous(*state_); }
     std::vector<sycl::event> get_wait_list() const { return detail::state_wait_list(*state_); }
 
     // -------------------------------------------------------------------------
-    // group — one step of concurrent work, of either kind
+    // group — one task made of concurrent subtasks, of either kind
     // -------------------------------------------------------------------------
 
     class group {
     public:
         template <class CGF>
         sycl::event submit(CGF&& cgf) {
-            return enqueue(nullptr, std::forward<CGF>(cgf));
+            return body(nullptr, nullptr, [&](sycl::handler& h) { cgf(h); });
         }
 
         template <class CGF>
         sycl::event submit(const sycl::property_list& props, CGF&& cgf) {
             sycl::device dev;
-            if (detail::retarget_device(props, dev)) return enqueue(&dev, std::forward<CGF>(cgf));
-            return enqueue(nullptr, std::forward<CGF>(cgf));
+            if (detail::retarget_device(props, dev))
+                return body(&dev, nullptr, [&](sycl::handler& h) { cgf(h); });
+            return body(nullptr, nullptr, [&](sycl::handler& h) { cgf(h); });
         }
 
         template <class CGF>
         sycl::event submit(const sycl::device& dev, CGF&& cgf) {
-            return enqueue(&dev, std::forward<CGF>(cgf));
+            return body(&dev, nullptr, [&](sycl::handler& h) { cgf(h); });
         }
 
-        /// A host member. It waits for the step before the group and for no
-        /// member of it, this one's own kind included.
+        template <class CGF>
+        sycl::event submit(const std::vector<sycl::event>& deps, CGF&& cgf) {
+            return body(nullptr, &deps, [&](sycl::handler& h) { cgf(h); });
+        }
+
+        template <class CGF>
+        sycl::event submit(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                           CGF&& cgf) {
+            return body(&dev, &deps, [&](sycl::handler& h) { cgf(h); });
+        }
+
         template <class F>
-        sycl::event submit_host(F&& f) {
-            sycl::event e = detail::submit_group_host_item(
-                *state_, deps_.kernel, detail::make_host_fn(std::forward<F>(f)));
-            std::lock_guard<std::mutex> lock{mutex_};
-            host_events_.push_back(e);
-            return e;
+        sycl::event async_host(F&& f) {
+            return host_call(nullptr, nullptr, std::forward<F>(f));
         }
-
-        /// A chain as a member: it contributes its LAST event to the step.
         template <class F>
-        sycl::event submit_chain(F&& f) {
-            detail::ChainState cs = detail::begin_chain_with(*state_, deps_.kernel);
-            chain              c{cs};
-            f(c);
-            sycl::event e = detail::finish_chain(cs);
-
-            std::lock_guard<std::mutex> lock{mutex_};
-            host_events_.push_back(e);
-            return e;
+        sycl::event async_host(const sycl::device& dev, F&& f) {
+            return host_call(&dev, nullptr, std::forward<F>(f));
+        }
+        template <class F>
+        sycl::event async_host(const std::vector<sycl::event>& deps, F&& f) {
+            return host_call(nullptr, &deps, std::forward<F>(f));
+        }
+        template <class F>
+        sycl::event async_host(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                               F&& f) {
+            return host_call(&dev, &deps, std::forward<F>(f));
         }
 
-        std::vector<sycl::event> events() const {
-            std::lock_guard<std::mutex> lock{mutex_};
-            std::vector<sycl::event>    out;
-            out.reserve(kernel_events_.size() + host_events_.size());
-            for (const auto& [e, b] : kernel_events_) out.push_back(e);
-            for (const auto& e : host_events_) out.push_back(e);
-            return out;
+        sycl::event memcpy(void* dst, const void* src, std::size_t bytes) {
+            return detail::copy_bytes(*state_, nullptr, dst, src, bytes, nullptr);
         }
+        sycl::event memcpy(const sycl::device& dev, void* dst, const void* src,
+                           std::size_t bytes) {
+            return detail::copy_bytes(*state_, &dev, dst, src, bytes, nullptr);
+        }
+        sycl::event memcpy(const std::vector<sycl::event>& deps, void* dst, const void* src,
+                           std::size_t bytes) {
+            return detail::copy_bytes(*state_, nullptr, dst, src, bytes, &deps);
+        }
+        sycl::event memcpy(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                           void* dst, const void* src, std::size_t bytes) {
+            return detail::copy_bytes(*state_, &dev, dst, src, bytes, &deps);
+        }
+
+        template <class T>
+        sycl::event copy(const T* src, T* dst, std::size_t count) {
+            return memcpy(dst, src, count * sizeof(T));
+        }
+        template <class T>
+        sycl::event copy(const sycl::device& dev, const T* src, T* dst, std::size_t count) {
+            return memcpy(dev, dst, src, count * sizeof(T));
+        }
+        template <class T>
+        sycl::event copy(const std::vector<sycl::event>& deps, const T* src, T* dst,
+                         std::size_t count) {
+            return memcpy(deps, dst, src, count * sizeof(T));
+        }
+        template <class T>
+        sycl::event copy(const sycl::device& dev, const std::vector<sycl::event>& deps,
+                         const T* src, T* dst, std::size_t count) {
+            return memcpy(dev, deps, dst, src, count * sizeof(T));
+        }
+
+        sycl::event memset(void* p, int value, std::size_t bytes) {
+            return detail::set_bytes(*state_, nullptr, p, value, bytes, nullptr);
+        }
+        sycl::event memset(const sycl::device& dev, void* p, int value, std::size_t bytes) {
+            return detail::set_bytes(*state_, &dev, p, value, bytes, nullptr);
+        }
+        sycl::event memset(const std::vector<sycl::event>& deps, void* p, int value,
+                           std::size_t bytes) {
+            return detail::set_bytes(*state_, nullptr, p, value, bytes, &deps);
+        }
+        sycl::event memset(const sycl::device& dev, const std::vector<sycl::event>& deps, void* p,
+                           int value, std::size_t bytes) {
+            return detail::set_bytes(*state_, &dev, p, value, bytes, &deps);
+        }
+
+        template <class T>
+        sycl::event fill(void* p, const T& pattern, std::size_t count) {
+            return detail::fill_bytes(*state_, nullptr, p, &pattern, sizeof(T), count, nullptr);
+        }
+        template <class T>
+        sycl::event fill(const sycl::device& dev, void* p, const T& pattern, std::size_t count) {
+            return detail::fill_bytes(*state_, &dev, p, &pattern, sizeof(T), count, nullptr);
+        }
+        template <class T>
+        sycl::event fill(const std::vector<sycl::event>& deps, void* p, const T& pattern,
+                         std::size_t count) {
+            return detail::fill_bytes(*state_, nullptr, p, &pattern, sizeof(T), count, &deps);
+        }
+        template <class T>
+        sycl::event fill(const sycl::device& dev, const std::vector<sycl::event>& deps, void* p,
+                         const T& pattern, std::size_t count) {
+            return detail::fill_bytes(*state_, &dev, p, &pattern, sizeof(T), count, &deps);
+        }
+
+        std::vector<sycl::event> events() const { return detail::group_events(*state_); }
 
     private:
         friend class queue;
-        group(detail::QueueState& st, detail::group_deps deps)
-            : state_{&st}, deps_{std::move(deps)} {}
+        explicit group(std::shared_ptr<detail::GroupState> state) : state_{std::move(state)} {}
 
-        template <class CGF>
-        sycl::event enqueue(const sycl::device* dev, CGF&& cgf) {
-            detail::submission s = detail::begin_group_item(*state_, dev, deps_);
-
-            // A dependency the target backend will not honour is waited here.
-            for (auto& e : s.host_waits) e.wait();
-
-            sycl::event e = s.target->submit(
-                dev ? sycl::property_list{sycl::property::command_group::AdaptiveCpp_retarget{*dev}}
-                    : sycl::property_list{},
-                [&](sycl::handler& h) {
-                    h.depends_on(s.deps);
-                    cgf(h);
-                });
-
-            std::lock_guard<std::mutex> lock{mutex_};
-            kernel_events_.emplace_back(e, s.backend);
+        template <class Body>
+        sycl::event body(const sycl::device* dev, const std::vector<sycl::event>* extra,
+                         Body&& fill) {
+            detail::submission s = detail::begin_group_item(*state_, dev, extra);
+            sycl::event        e = s.target->submit(s.props, [&](sycl::handler& h) {
+                h.depends_on(s.deps);
+                fill(h);
+            });
+            detail::record_group_event(*state_, e);
             return e;
         }
 
-        detail::QueueState*                  state_;
-        detail::group_deps                   deps_;
-        mutable std::mutex                   mutex_;
-        std::vector<detail::annotated_event> kernel_events_;
-        std::vector<sycl::event>             host_events_;
+        template <class F>
+        sycl::event host_call(const sycl::device* dev, const std::vector<sycl::event>* extra,
+                              F&& f) {
+            auto guarded = detail::guard_host(detail::state_of_group(*state_), std::forward<F>(f));
+            return body(dev, extra, [&](sycl::handler& h) { h.async_host(guarded); });
+        }
+
+        std::shared_ptr<detail::GroupState> state_;
     };
 
-    /// f(group&). Returns the step's events, which the next item will wait on.
+    /// f(group&). Returns the group's subtask events; the group is one task to
+    /// everything submitted after it.
     template <class F>
     std::vector<sycl::event> submit_group(F&& f) {
-        group g{*state_, detail::begin_group(*state_)};
+        group g{detail::open_group(*state_)};
         f(g);
-
-        std::vector<detail::annotated_event> kernel;
-        std::vector<sycl::event>             host;
-        {
-            std::lock_guard<std::mutex> lock{g.mutex_};
-            kernel = g.kernel_events_;
-            host   = g.host_events_;
-        }
-        detail::end_group(*state_, kernel, host);
-
-        std::vector<sycl::event> events;
-        events.reserve(kernel.size() + host.size());
-        for (auto& [e, b] : kernel) events.push_back(e);
-        for (auto& e : host) events.push_back(e);
-        return events;
+        return g.events();
     }
 
 private:
     friend detail::QueueState& detail::state_of(const queue& q);
 
     template <class CGF>
-    sycl::event enqueue(const sycl::device* dev, const std::vector<sycl::event>* extra, CGF&& cgf) {
-        return body(dev, extra, [&](sycl::handler& h) { cgf(h); });
+    sycl::event kernel(const sycl::device* dev, const std::vector<sycl::event>* extra,
+                       CGF&& cgf) {
+        return body(detail::lane::primary, dev, extra, [&](sycl::handler& h) { cgf(h); });
     }
 
     template <class Body>
-    sycl::event body(const sycl::device* dev, const std::vector<sycl::event>* extra, Body&& fill) {
-        detail::submission s = detail::begin_item(*state_, dev, /*concurrent=*/false);
+    sycl::event body(detail::lane l, const sycl::device* dev,
+                     const std::vector<sycl::event>* extra, Body&& fill) {
+        detail::submission s = detail::begin_item(*state_, l, dev, extra);
+        return s.target->submit(s.props, [&](sycl::handler& h) {
+            h.depends_on(s.deps);
+            fill(h);
+        });
+    }
 
-        // The interlock's cross-backend edges, and the stream's own: the backend
-        // being submitted to will not honour them (see the header).
-        for (auto& e : s.host_waits) e.wait();
-
-        if (extra) s.deps.insert(s.deps.end(), extra->begin(), extra->end());
-
-        sycl::event e = s.target->submit(
-            dev ? sycl::property_list{sycl::property::command_group::AdaptiveCpp_retarget{*dev}}
-                : sycl::property_list{},
-            [&](sycl::handler& h) {
-                h.depends_on(s.deps);
-                fill(h);
-            });
-
-        detail::end_item(*state_, e, s.backend);
-        return e;
+    template <class F>
+    sycl::event host_call(detail::lane l, const sycl::device* dev,
+                          const std::vector<sycl::event>* extra, F&& f) {
+        auto guarded = detail::guard_host(*state_, std::forward<F>(f));
+        return body(l, dev, extra, [&](sycl::handler& h) { h.async_host(guarded); });
     }
 
     std::shared_ptr<detail::QueueState> state_;

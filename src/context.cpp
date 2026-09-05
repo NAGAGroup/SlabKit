@@ -283,7 +283,7 @@ device_groups context::select_groups(aspect a) const {
 // it is handed, including another backend's device memory (measured -- see
 // test_context). Taking the first backend's answer would therefore have made a
 // CUDA device pointer look like host memory whenever an OMP backend happened to
-// be enumerated first, and the routed mirrors would have chosen a host memcpy
+// be enumerated first, and a routed copy would have chosen a host memcpy
 // over it. So every backend is asked, a device or shared answer wins outright,
 // and `host` is only believed when nothing stronger came back.
 std::size_t context::strongest_answer(const void* p, kind& out) const {

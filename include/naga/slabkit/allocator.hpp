@@ -10,11 +10,17 @@
 // an arena is a budget, and a budget that silently grows is not one.
 //
 // DEFERRED RELEASE is the whole point. `deallocate` never frees on the calling
-// thread: it posts a host task holding a copy of the queue handle, which waits
-// the stream and only then releases. So a container may reallocate, shrink or
-// die while a kernel still holds the old pointer, and the memory outlives the
-// stream's use of it. The address range is the only record kept -- the release
-// decides by it whether the bytes belong to the pool's slab or to the runtime.
+// thread: it posts a host task, ordered after the kernel and group work
+// outstanding when it was called, which releases when it runs. So a container
+// may reallocate, shrink or die while a kernel still holds the old pointer, and
+// the memory outlives the stream's use of it. The address range is the only
+// record kept -- the release decides by it whether the bytes belong to the
+// pool's slab or to the runtime.
+//
+// A release is host/memory work, and host/memory work is not ordered against
+// host/memory work: a caller who has memory tasks reading the old storage --
+// a container copying out of it -- passes their events to the overload that
+// takes them.
 //
 // std containers over the SHARED and HOST kinds work unchanged. Over the DEVICE
 // kind they are a usage error rather than a feature: element access would be a
@@ -26,6 +32,7 @@
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <sycl/sycl.hpp>
 
@@ -53,6 +60,8 @@ public:
 
     /// Posted, never immediate. Never throws.
     void raw_deallocate(void* p, std::size_t bytes) noexcept;
+    void raw_deallocate(void* p, std::size_t bytes,
+                        const std::vector<sycl::event>& deps) noexcept;
 
     const queue&        get_queue() const noexcept;
     kind                get_kind() const noexcept;
@@ -106,6 +115,11 @@ public:
     }
 
     void deallocate(T* p, std::size_t n) noexcept { route_->raw_deallocate(p, n * sizeof(T)); }
+
+    /// The same release, held back until `deps` have completed as well.
+    void deallocate(T* p, std::size_t n, const std::vector<sycl::event>& deps) noexcept {
+        route_->raw_deallocate(p, n * sizeof(T), deps);
+    }
 
     queue        get_queue() const { return route_->get_queue(); }
     kind         get_kind() const { return route_->get_kind(); }

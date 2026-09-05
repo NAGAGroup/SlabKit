@@ -20,7 +20,8 @@
 //
 // The answers for this instance's own devices -- INCLUDING the same-backend
 // pair measurements, which cost real device work -- are computed once here and
-// read from the cache by select_devices, the routed mirrors and usm_vector.
+// read from the cache by select_devices, the queue's memory tasks and
+// usm_vector.
 // There is no process-wide state and no probe function.
 
 #include <cstddef>

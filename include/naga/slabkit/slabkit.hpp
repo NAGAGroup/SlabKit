@@ -10,7 +10,7 @@
 //   context       the device set, one sycl::context per backend, and the honest
 //                 answers to what the machine can do
 //   queue         one in-order stream over that context, with placement,
-//                 concurrent groups and a host-work pool
+//                 concurrent groups, host callables and memory work
 //   malloc_*      uninitialized storage, SYCL's names and signatures
 //   make_*        constructed objects, std::make_unique's forms
 //   DeviceArena   a bump region over one slab
@@ -31,7 +31,6 @@
 #include "naga/slabkit/make.hpp"
 #include "naga/slabkit/make_shared.hpp"
 #include "naga/slabkit/malloc.hpp"
-#include "naga/slabkit/mirrors.hpp"
 #include "naga/slabkit/pool.hpp"
 #include "naga/slabkit/queue.hpp"
 #include "naga/slabkit/usm_vector.hpp"

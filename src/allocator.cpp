@@ -84,6 +84,11 @@ void* AllocRoute::raw_allocate(std::size_t bytes, std::size_t align) {
 }
 
 void AllocRoute::raw_deallocate(void* p, std::size_t bytes) noexcept {
+    raw_deallocate(p, bytes, {});
+}
+
+void AllocRoute::raw_deallocate(void* p, std::size_t bytes,
+                                const std::vector<sycl::event>& deps) noexcept {
     if (p == nullptr) return;
 
     // An arena has no per-allocation free; the arena handle this route holds is
@@ -96,12 +101,11 @@ void AllocRoute::raw_deallocate(void* p, std::size_t bytes) noexcept {
 
         const sycl::context ctx = q_.get_context().context_of(*dev_);
 
-        // ONE HOST ITEM, and no wait inside it. The interlock already orders it
-        // after the kernel work outstanding when deallocate was called, which is
-        // the whole of what "deferred" has to mean. It captures no slabkit queue
-        // on purpose: a task holding the last handle would have the stream's
-        // destructor drain the lane the task is running on.
-        q_.submit_host([p, bytes, ctx, pool_impl]() mutable {
+        // ONE HOST TASK, and no wait inside it. The stream orders it after the
+        // kernel and group work outstanding when deallocate was called; memory
+        // work reading these bytes is ordered by `deps`, which is what the
+        // caller passed them for.
+        q_.async_host(deps, [p, bytes, ctx, pool_impl]() mutable {
             if (pool_impl && pool_impl->owns(p)) {
                 const std::size_t nodes =
                     align_up(bytes, pool_impl->node_size()) / pool_impl->node_size();

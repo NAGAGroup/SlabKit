@@ -6,29 +6,20 @@
 //
 // Internal; not installed.
 //
-// Per backend of the context, created on first use: an in-order sycl::queue for
-// ordinary kernel items and an out-of-order one for group members. Both carry
-// AdaptiveCpp_retargetable, which is what makes the retarget command-group
-// property legal on them, and both are built on that backend's default context
-// so a retarget never crosses one.
+// THREE sycl::queues, all AdaptiveCpp_retargetable and none constructed with a
+// device: the PRIMARY carries the in-order property and takes kernel tasks and
+// the _in_order memory tasks, the GROUP queue takes a group's subtasks, and the
+// HOST/MEMORY queue takes the asynchronous memory tasks. A submission reaches a
+// device through AdaptiveCpp_retarget, naming the device and the context this
+// stream's slabkit context holds for that device's backend.
 //
-// THE HOST LANE is a third queue, out-of-order, on the OpenMP backend's own
-// device and default context. It always exists, whether or not the stream's
-// context contains an OpenMP device, because host work has to have somewhere to
-// run. Its items are OpenMP single_tasks whose body is an indirect call through
-// a function pointer -- see `HostThunk` below.
+// There is no ordering state to keep: a queue's own wait list IS the record of
+// what it has outstanding, and merging those lists at submission time is the
+// whole of the ordering (queue.hpp).
 //
-// THE ORDERING STATE is two fields. `kernel_step` is the kernel work the next
-// kernel item must follow; `host_pending` is the host work outstanding right
-// now. A kernel item waits for both and empties `host_pending` (it has absorbed
-// it). A host item waits for `kernel_step` alone and appends itself to
-// `host_pending` -- host work is parallel with host work.
-//
-// The mutex guards those two, `pairs` and `host_errors`, and nothing else. It is
-// taken to resolve a submission and taken again to record it, and is never held
-// across a submit or a wait.
+// HOST ERRORS are a shared_ptr rather than a member, because a host callable
+// outlives the stream that submitted it: nothing drains at destruction.
 
-#include <cstddef>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -41,74 +32,72 @@
 
 namespace naga::slabkit::detail {
 
-/// What a host item's kernel actually captures: two trivially copyable values,
-/// which is what kernel captures must be. `fn` is the trampoline's address --
-/// ordinary host code in this library -- and calling it INDIRECTLY is what the
-/// generic flow's JIT accepts where a direct call to complex host code does not.
-struct HostThunk {
-    void (*fn)(void*);
-    void* arg;
+/// Exceptions escaping host callables, held for throw_asynchronous.
+class HostErrors {
+public:
+    void               push(std::exception_ptr e);
+    std::exception_ptr pop();
+
+private:
+    std::mutex                      mutex_;
+    std::vector<std::exception_ptr> errors_;
 };
 
 class QueueState {
 public:
-    QueueState(context ctx, sycl::async_handler handler);
+    QueueState(context ctx, const sycl::device* dev, sycl::async_handler handler);
+
+    /// Destroying the LAST handle drains the stream. Not a wait for the sake of
+    /// ordering -- the queues carry their own work out -- but for the sake of
+    /// the tasks' own lifetime: a host task outlives the stream otherwise, and
+    /// a deferred release that runs during the runtime's shutdown frees memory
+    /// through structures that are already gone (measured: 7 crashes in 25 runs
+    /// of a container going out of scope with its release enqueued).
+    ///
+    /// Nothing slabkit submits holds a queue handle, so this can never be a
+    /// task waiting on itself.
     ~QueueState();
 
     QueueState(const QueueState&)            = delete;
     QueueState& operator=(const QueueState&) = delete;
 
-    struct BackendPair {
-        sycl::queue inorder;
-        sycl::queue concurrent;
-    };
+    /// The placement for `dev`, or for the default device when null.
+    /// \throws std::invalid_argument if `dev` is not in this stream's context.
+    sycl::property_list place(const sycl::device* dev) const;
 
-    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+    /// The device a submission placed on `dev` runs on.
+    const sycl::device& device_or_default(const sycl::device* dev) const;
 
-    /// The pair for backend index `b`, created on first use. Caller holds the
-    /// mutex; construction touches the runtime but never submits.
-    BackendPair& pair_for(std::size_t b);
+    context      ctx;
+    sycl::device default_device;
 
-    /// \throws std::invalid_argument if `dev` is not in the context.
-    std::size_t backend_index_of(const sycl::device& dev) const;
+    sycl::queue primary;
+    sycl::queue group_queue;
+    sycl::queue host_queue;
 
-    /// Every pair created so far, for wait/throw fan-out. Caller holds the mutex.
-    std::vector<BackendPair*> live_pairs();
+    /// Where a staged copy issues its two legs, from inside the host task that
+    /// owns them. Nothing merges against it: the task waits each leg before it
+    /// returns, so the task's own event is the whole of that copy's ordering.
+    sycl::queue legs;
 
-    /// Submit one host item on the lane, waiting for `deps` first. Takes no lock.
-    sycl::event launch_host(const std::vector<sycl::event>& deps, HostFn fn);
-
-    /// Drop the host events that have already completed, so a long run of host
-    /// work does not accumulate a dependency list. Caller holds the mutex.
-    void prune_host_pending();
-
-    void record_host_error(std::exception_ptr e);
-
-    context             ctx;
-    sycl::async_handler handler;
-    bool                has_handler;
-    sycl::device        default_device;
-    std::size_t         default_backend;
-
-    // The host lane. `host_backend` is this lane's index within ctx.backends(),
-    // or npos when the stream's context has no OpenMP device -- in which case a
-    // kernel item can never take a host event through depends_on and always pays
-    // the host wait.
-    sycl::device  host_device;
-    sycl::context host_context;
-    sycl::queue   host_lane;
-    std::size_t   host_backend;
-
-    std::mutex                                mutex;
-    std::vector<std::unique_ptr<BackendPair>> pairs;
-    std::vector<annotated_event>              kernel_step;
-    std::vector<sycl::event>                  host_pending;
-    std::vector<std::exception_ptr>           host_errors;
+    std::shared_ptr<HostErrors> errors;
 };
 
-/// The QueueState whose host lane the calling thread is currently running a task
-/// for, or nullptr. This is how a wait issued FROM a host task avoids waiting on
-/// the lane that task occupies -- the self-wait that deadlocks.
-QueueState* running_host_task_of();
+/// A group's captured dependency set and the events of its subtasks. The group
+/// lives inside one submit_group call, and the stream outlives it.
+class GroupState {
+public:
+    GroupState(QueueState& st, std::vector<sycl::event> deps);
+
+    QueueState&                     state;
+    const std::vector<sycl::event>  captured;
+
+    void                     record(const sycl::event& e);
+    std::vector<sycl::event> events() const;
+
+private:
+    mutable std::mutex       mutex_;
+    std::vector<sycl::event> events_;
+};
 
 }  // namespace naga::slabkit::detail
