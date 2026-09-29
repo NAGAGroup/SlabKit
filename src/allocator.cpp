@@ -76,10 +76,8 @@ void* AllocRoute::raw_allocate(std::size_t bytes, std::size_t align) {
 
     if (!h) throw std::bad_alloc{};
 
-    // The handle's deleter is dropped here on purpose: an allocator's release
-    // decides by address, so carrying a deleter would only
-    // offer a second, immediate way to free -- exactly what deallocate exists
-    // to prevent.
+    // The handle's deleter is dropped here on purpose: deallocate is the one
+    // release path, and it decides the route by address.
     return h.release();
 }
 
