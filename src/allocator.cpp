@@ -12,6 +12,7 @@
 #include "detail/arena_impl.hpp"
 #include "detail/os_alloc.hpp"
 #include "detail/pool_impl.hpp"
+#include "detail/queue_state.hpp"
 #include "naga/slabkit/context.hpp"
 #include "naga/slabkit/detail/core.hpp"
 
@@ -101,11 +102,15 @@ void AllocRoute::raw_deallocate(void* p, std::size_t bytes,
 
         const sycl::context ctx = q_.get_context().context_of(*dev_);
 
-        // ONE HOST TASK, and no wait inside it. The stream orders it after the
-        // kernel and group work outstanding when deallocate was called; memory
-        // work reading these bytes is ordered by `deps`, which is what the
-        // caller passed them for.
-        q_.async_host(deps, [p, bytes, ctx, pool_impl]() mutable {
+        // ONE HOST TASK on the stream's FREES lane, and no wait inside it. It
+        // runs after all the kernel, group and memory work outstanding when
+        // deallocate was called, and after `deps` (the memory work reading
+        // these bytes, which is what the caller passed them for). Nothing
+        // submitted later depends on it -- the bytes are not needed once they
+        // are freed -- so a kernel never waits for a free (a free's cudaFree
+        // waits for the stream, and a kernel that waited for the free would
+        // deadlock it). queue::wait() drains the frees lane.
+        submit_free(state_of(q_), nullptr, deps, [p, bytes, ctx, pool_impl]() mutable {
             if (pool_impl && pool_impl->owns(p)) {
                 const std::size_t nodes =
                     align_up(bytes, pool_impl->node_size()) / pool_impl->node_size();

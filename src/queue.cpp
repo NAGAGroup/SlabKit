@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -70,6 +71,7 @@ QueueState::QueueState(context c, const sycl::device* dev, sycl::async_handler h
     , primary{make_lane(handler, kPrimaryProps)}
     , group_queue{make_lane(handler, kConcurrentProps)}
     , host_queue{make_lane(handler, kConcurrentProps)}
+    , frees{make_lane(handler, kConcurrentProps)}
     , legs{make_lane(handler, kConcurrentProps)}
     , errors{std::make_shared<HostErrors>()} {
     if (dev && !ctx.contains(*dev))
@@ -130,6 +132,25 @@ submission begin_item(QueueState& st, lane l, const sycl::device* dev,
 
     append(s.deps, extra);
     return s;
+}
+
+sycl::event submit_free(QueueState& st, const sycl::device* dev,
+                        const std::vector<sycl::event>& extra, std::function<void()> f) {
+    // After everything outstanding on the other three lanes, plus the caller's
+    // dependencies -- but on a lane of its own, which begin_item and open_group
+    // never merge, so no later kernel waits for this host task.
+    std::vector<sycl::event> deps;
+    append(deps, st.primary.get_wait_list());
+    append(deps, st.group_queue.get_wait_list());
+    append(deps, st.host_queue.get_wait_list());
+    append(deps, &extra);
+
+    // The same guard as any host callable: an escaping exception reaches HostErrors.
+    auto guarded = guard_host(st, std::move(f));
+    return st.frees.submit(st.place(dev), [&](sycl::handler& h) {
+        h.depends_on(deps);
+        h.async_host(guarded);
+    });
 }
 
 std::shared_ptr<GroupState> open_group(QueueState& st) {
@@ -454,6 +475,7 @@ void state_wait(QueueState& st) {
     st.primary.wait();
     st.group_queue.wait();
     st.host_queue.wait();
+    st.frees.wait();  // deferred frees are drained here and nowhere else
 }
 
 void state_wait_and_throw(QueueState& st) {
@@ -465,6 +487,7 @@ void state_throw_asynchronous(QueueState& st) {
     st.primary.throw_asynchronous();
     st.group_queue.throw_asynchronous();
     st.host_queue.throw_asynchronous();
+    st.frees.throw_asynchronous();
 
     // A host callable's exception is asynchronous in exactly SYCL's sense, but
     // the runtime has no way to be told about it, so the stream keeps its own.
@@ -476,6 +499,7 @@ std::vector<sycl::event> state_wait_list(QueueState& st) {
     append(out, st.primary.get_wait_list());
     append(out, st.group_queue.get_wait_list());
     append(out, st.host_queue.get_wait_list());
+    append(out, st.frees.get_wait_list());
     return out;
 }
 

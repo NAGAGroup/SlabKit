@@ -130,3 +130,48 @@ TEST_CASE("std containers work over the host-accessible kinds", "[allocator]") {
     // The deferred releases these leave behind must all run.
     f.q.wait();
 }
+
+TEST_CASE("a kernel submitted right after an OS-route free never waits for the free",
+          "[allocator]") {
+    Fixture f;
+
+    constexpr std::size_t big   = std::size_t{1} << 20;
+    constexpr std::size_t small = 1024;
+    constexpr int         reps  = 200;
+
+    // The long-lived vector: every iteration's second kernel adds 1 to each element.
+    usm_vector<float> steady{small, 0.0f, allocator<float>{f.q, kind::device, f.dev}};
+    f.q.wait();
+    float* keep = steady.data();
+
+    for (int i = 0; i < reps; ++i) {
+        {
+            usm_vector<float> scratch{big, allocator<float>{f.q, kind::device, f.dev}};
+            float*            tmp = scratch.data();
+            f.q.parallel_for(std::vector<sycl::event>{scratch.last_event()}, sycl::range<1>{big},
+                             [=](sycl::id<1> j) { tmp[j[0]] = static_cast<float>(j[0]); });
+        }  // the OS-route free is deferred here
+        // Submitted immediately after the free was posted: on CUDA this used to hang.
+        f.q.parallel_for(sycl::range<1>{small}, [=](sycl::id<1> j) { keep[j[0]] += 1.0f; });
+    }
+    f.q.wait();
+
+    const auto values = slabkit_test::read_back(f.q, keep, small);
+    for (float v : values) REQUIRE(v == static_cast<float>(reps));
+}
+
+TEST_CASE("wait drains the frees lane: the pool has nothing outstanding right after",
+          "[allocator]") {
+    Fixture f;
+
+    DevicePool pool{f.q, kind::device, 1024, 256};  // four slots of 256 bytes
+    {
+        usm_vector<float> a{64, 1.0f, allocator<float>{f.q, pool}};
+        usm_vector<float> b{64, 2.0f, allocator<float>{f.q, pool}};
+        usm_vector<float> c{64, 3.0f, allocator<float>{f.q, pool}};
+        REQUIRE(pool.outstanding() == 3);
+    }  // three deferred releases, posted on the frees lane
+
+    f.q.wait();
+    REQUIRE(pool.outstanding() == 0);  // no polling: wait() covers the frees lane
+}
