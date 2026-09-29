@@ -1,158 +1,85 @@
 [workspace]
-authors = ["Jack Myers <jack@myersjack.dev>"]
-channels = ["https://prefix.dev/jackm97/naga-labs"]
-name = "slabkit"
+authors   = ["Jack Myers <jack@myersjack.dev>"]
+name      = "slabkit"
+version   = "0.1.0"
+channels  = ["https://prefix.dev/jackm97/naga-labs-staging"]
 platforms = ["linux-64"]
-version = "0.1.0"
-preview = ["pixi-build"]
+preview   = ["pixi-build"]
 
-# Compiler selection (post-migration): variant stems, resolved by the backend
-# as <stem>_<target_platform> activation packages from the naga-labs channel.
-# Never name an activation package in a dep table; never add *_compiler_version.
+# One pool of specs; every table inherits with { workspace = true }.
+[workspace.dependencies]
+slabkit                = { path = "." }
+slabkit-tests          = { path = "tests" }
+catch2                 = ">=3.8"
+naga-acpp-runtime-cuda = "*"
+naga-acpp-tools        = "==2026.09.29"
+nushell                = ">=0.110.0,<0.111"
+
+# Compiler stems resolve to <stem>_<platform> activation packages; their
+# run-exports bring the toolchain. The backend supplies cmake/ninja.
 [workspace.build-variants]
-c_compiler = ["naga-acpp-clang"]
-cxx_compiler = ["naga-acpp-clangxx"]
+c_compiler           = ["naga-acpp-clang"]
+cxx_compiler         = ["naga-acpp-clangxx"]
+c_compiler_version   = ["2026.09.29"]
+cxx_compiler_version = ["2026.09.29"]
+naga-acpp-llvm       = ["21"]
+cmake                = ["3.31.*"]
 
-[feature.opencl.activation.env]
-ACPP_VISIBILITY_MASK = "omp;ocl"
-
-[feature.opencl.dependencies]
-intel-opencl-rt = ">=2025.2.0,<2026"
-
-[feature.level-zero.activation.env]
-ACPP_VISIBILITY_MASK = "omp;ze"
-
-[feature.level-zero.dependencies]
-level-zero = ">=1.28.2,<2"
-
-[feature.cuda.activation.env]
-ACPP_VISIBILITY_MASK = "omp;cuda"
-
-[feature.cuda.dependencies]
-cuda-nvvm = ">=12.6,<12.7"
-cuda-runtime = ">=12.6,<12.7"
-
-[feature.amd.activation.env]
-ACPP_VISIBILITY_MASK = "omp;hip"
-
-[feature.amd.dependencies]
-hip-runtime-amd = ">=6,<7"
-rocm-device-libs = ">=6,<7"
-
+# ---- default environment: the built library and its tests ------------------
 [dependencies]
-slabkit = { path = "." }
+slabkit       = { workspace = true }
+slabkit-tests = { workspace = true }
 
-# Consumer envs per backend (implicit default env = bare package);
-# `all` carries every runtime.
+[tasks]
+test = "slabkit-tests"
+
+# ---- CUDA runtime, opt-in ---------------------------------------------------
+[feature.cuda.dependencies]
+naga-acpp-runtime-cuda = { workspace = true }
+
 [environments.cuda]
 features = ["cuda"]
 solve-group = "default"
 
-[environments.l0]
-features = ["level-zero"]
-solve-group = "default"
-
-[environments.ocl]
-features = ["opencl"]
-solve-group = "default"
-
-[environments.amd]
-features = ["amd"]
-solve-group = "default"
-
-[environments.all]
-features = ["cuda", "level-zero", "opencl", "amd"]
-solve-group = "default"
-
-# ------------------------------------------------------------------------------
-# pixi-build package definition: allows other pixi workspaces to consume
-# slabkit as a source dependency, e.g. `slabkit = { path = "../slabkit" }`.
-# ------------------------------------------------------------------------------
+# ---- the library package ----------------------------------------------------
 [package]
-name = "slabkit"
+name    = "slabkit"
 version = "0.1.0"
 
 [package.build.backend]
-name = "pixi-build-cmake"
-version = "*"
-channels = ["https://prefix.dev/pixi-build-backends", "https://prefix.dev/conda-forge"]
-
-[package.build-dependencies]
-cmake = ">=3.28,<4"
-ninja = ">=1.12"
-
-# SYCL headers + lib/cmake/AdaptiveCpp. The library's own translation units
-# contain SYCL kernels, so the toolchain is a build requirement, not just a
-# test one. The runtime arrives via run-export; consumers must NOT write
-# acpp-runtime or acpp-llvm themselves.
-[package.host-dependencies]
-naga-acpp = "==2026.09.05"
+name     = "pixi-build-cmake"
+version  = "*"
+channels = ["https://prefix.dev/pixi-build-backends"]
 
 [package.build.config]
-# Tests need Catch2, which the package build does not carry.
-extra-args = ["-DSLABKIT_BUILD_TESTS=OFF"]
-# Headers are installed but not compiled by the package build, so the
-# backend's ninja-based input tracking does not see them. Without this glob,
-# editing a header does NOT invalidate pixi's build cache.
+# Headers are installed, not compiled; without this, editing one does not
+# invalidate pixi's build cache.
 extra-input-globs = ["include/**/*.hpp"]
 
-# ------------------------------------------------------------------------------
-# DEV: package dep closure (toolchain) + dev tools/tasks. Hardware-flavored
-# variants; dev-omp = CPU-only via acpp's built-in OpenMP host backend.
-# A dev env drives CMake directly (no backend), so it names the compiler
-# activation package explicitly — the one place that is correct.
-# ------------------------------------------------------------------------------
+# ---- dev environment: full build closure of both packages, neither built -----
 [feature.dev.dev]
-slabkit = { path = "." }
-
-[feature.dev.activation.env]
-# A dev environment tests the backends it actually carries. Without this the
-# default selector reaches any device the system driver exposes -- on a box with
-# an NVIDIA driver, dev-omp would run its kernels on the GPU in an environment
-# that has no nvvm libdevice to compile them with.
-ACPP_VISIBILITY_MASK = "omp"
+slabkit       = { path = "." }
+slabkit-tests = { path = "tests" }
 
 [feature.dev.dependencies]
-nushell = ">=0.110.0,<0.111"
-catch2 = ">=3.8"
-naga-acpp = "==2026.09.05"
-naga-acpp-tools = "==2026.09.05"
-
-[feature.dev.target.linux-64.dependencies]
-naga-acpp-clangxx_linux-64 = "==2026.09.05"
-naga-acpp-clang_linux-64 = "==2026.09.05"
-
-[feature.dev.tasks]
-configure = "nu scripts/configure.nu dev"
-build = { cmd = "nu scripts/build.nu dev", depends-on = ["configure"] }
-test = { cmd = "nu scripts/test.nu dev", depends-on = ["build"] }
+nushell         = { workspace = true }
+naga-acpp-tools = { workspace = true }
 
 [environments.dev]
-features = ["cuda", "dev"]
+features = ["dev"]
 solve-group = "default"
 no-default-feature = true
 
 [environments.dev-cuda]
-features = ["cuda", "dev"]
+features = ["dev", "cuda"]
 solve-group = "default"
 no-default-feature = true
 
-[environments.dev-l0]
-features = ["level-zero", "dev"]
-solve-group = "default"
-no-default-feature = true
+[feature.git.dependencies]
+git = "*"
+[feature.git.tasks]
+setup-git = "git config core.hooksPath .project/hooks"
 
-[environments.dev-ocl]
-features = ["opencl", "dev"]
-solve-group = "default"
-no-default-feature = true
-
-[environments.dev-amd]
-features = ["amd", "dev"]
-solve-group = "default"
-no-default-feature = true
-
-[environments.dev-omp]
-features = ["dev"]
-solve-group = "default"
+[environments.git]
+features = ["git"]
 no-default-feature = true

@@ -49,14 +49,6 @@ set_target_properties(naga-slabkit PROPERTIES
 
 add_sycl_to_target(TARGET naga-slabkit SOURCES ${SLABKIT_SOURCES})
 
-option(SLABKIT_BUILD_TESTS "Build Catch2 test suite" OFF)
-
-if(SLABKIT_BUILD_TESTS)
-    find_package(Catch2 3 REQUIRED)
-    enable_testing()
-    add_subdirectory(tests)
-endif()
-
 # ------------------------------------------------------------------------------
 # Installation / package export
 # ------------------------------------------------------------------------------
