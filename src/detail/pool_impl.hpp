@@ -115,8 +115,8 @@ public:
 
     kind get_kind() const noexcept { return kind_; }
 
-    /// Is this address inside the pool's own grid? The allocator's deferred
-    /// release has only the address to go on.
+    /// Is this address inside the pool's own grid? The allocator's release
+    /// has only the address to go on.
     bool owns(const void* p) const noexcept {
         const auto* b = static_cast<const std::byte*>(p);
         return base_ != nullptr && b >= base_ && b < base_ + slot_count_ * node_size_;

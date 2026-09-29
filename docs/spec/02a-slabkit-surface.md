@@ -18,7 +18,7 @@ handles and one in-order stream of work. Seven parts, each specified below:
 4. **Capabilities** — the `aspect` vocabulary, three-valued answers, copy
    routes.
 5. The four **routed mirrors** — `memcpy`, `copy`, `memset`, `fill`.
-6. One **allocator** type over all kinds and routes, with deferred release.
+6. One **allocator** type over all kinds and routes, with synchronous release.
 7. `usm_vector` — a value-semantic array whose every mutation is enqueued.
 
 **Contracts are borrowed.** `malloc_*` behaves as `sycl::malloc_*`: null
@@ -473,7 +473,8 @@ public:
     template <class U> allocator(const allocator<U>&);     // rebind keeps state
 
     T*   allocate(std::size_t n);                          // throws std::bad_alloc
-    void deallocate(T* p, std::size_t n) noexcept;         // deferred; see rules
+    void deallocate(T* p, std::size_t n) noexcept;         // waits, then frees; see rules
+    void deallocate(T* p, std::size_t n, const std::vector<sycl::event>& deps) noexcept;  // waits deps first
 
     queue        get_queue()  const;
     kind         get_kind()   const;
@@ -489,18 +490,16 @@ Rules:
 - `allocate` is the storage family with `bad_alloc` instead of null. The
   pool route tries the pool, then the OS route on exhaustion; the arena
   route never falls back — an arena is a budget.
-- `deallocate` never frees on the calling thread: it posts one host item
-  (§3), which is therefore ordered after the kernel work outstanding when it
-  was called, and releases by the route the address belongs to — pool if
-  inside the pool's slab, otherwise OS; arena route: nothing. Always posted;
-  the address range is the only record.
+- `deallocate` frees on the calling thread, by the route the address belongs
+  to (pool if inside the pool's slab, otherwise OS; arena route: nothing). The
+  overload taking events waits for them first. Work still using the memory is
+  the caller's to wait for.
 - std containers over the shared and host kinds work unchanged. Over the
   device kind they are a usage error: element access is a host dereference
   of device memory. The device kind is for `usm_vector` and for handle
   users.
 - No construct/destroy hooks (objects are trivially destructible), no
-  allocation hints, no synchronous release (`q.wait()` first is the honest
-  spelling).
+  allocation hints.
 
 ## 8. `usm_vector`
 
@@ -554,10 +553,11 @@ Rules:
 - **Every copy is a routed `copy` on the container's queue** — between
   devices, backends or kinds — ordered as one item; the caller never sees
   the route except in time.
-- **Old storage is released through the allocator's deferred path**, so
-  `resize`, `reserve`, `shrink_to_fit`, reassignment and destruction never
-  invalidate memory a kernel may still hold: `data()`'s value changes at
-  reallocation, the memory outlives the stream's use of it.
+- **Old storage is freed synchronously** once the container's own last task
+  (the copy that read it) has completed. Kernels the caller launched over
+  `data()` are the caller's to wait for before `resize`, `reserve`,
+  `shrink_to_fit`, reassignment or destruction; `data()`'s value changes at
+  reallocation.
 - **`get_access()`** calls `q.wait()` and returns a mutable view; on a
   device-kind container it throws `std::invalid_argument`. **`host_view()`**
   calls `q.wait()` and returns a read-only view: borrowed for shared and

@@ -9,18 +9,11 @@
 // back to the OS on exhaustion, while the arena route never falls back --
 // an arena is a budget, and a budget that silently grows is not one.
 //
-// DEFERRED RELEASE is the whole point. `deallocate` never frees on the calling
-// thread: it posts a host task, ordered after the kernel and group work
-// outstanding when it was called, which releases when it runs. So a container
-// may reallocate, shrink or die while a kernel still holds the old pointer, and
-// the memory outlives the stream's use of it. The address range is the only
-// record kept -- the release decides by it whether the bytes belong to the
-// pool's slab or to the runtime.
-//
-// A release is host/memory work, and host/memory work is not ordered against
-// host/memory work: a caller who has memory tasks reading the old storage --
-// a container copying out of it -- passes their events to the overload that
-// takes them.
+// `deallocate` frees on the calling thread; the overload taking events waits for
+// them first. The caller must have waited for any work of theirs that still uses
+// the memory: a kernel over it, or memory tasks reading it. usm_vector passes its
+// own last task. The address range is the only record kept -- the release decides
+// by it whether the bytes belong to the pool's slab or to the runtime.
 //
 // std containers over the SHARED and HOST kinds work unchanged. Over the DEVICE
 // kind they are a usage error rather than a feature: element access would be a
@@ -58,7 +51,7 @@ public:
     /// \throws std::bad_alloc
     void* raw_allocate(std::size_t bytes, std::size_t align);
 
-    /// Posted, never immediate. Never throws.
+    /// Waits `deps`, then frees on the calling thread. Never throws.
     void raw_deallocate(void* p, std::size_t bytes) noexcept;
     void raw_deallocate(void* p, std::size_t bytes,
                         const std::vector<sycl::event>& deps) noexcept;

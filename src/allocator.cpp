@@ -1,5 +1,5 @@
 // =============================================================================
-// allocator.cpp — the allocator's route, and its deferred release
+// allocator.cpp — the allocator's route, and its release
 // =============================================================================
 
 #include "naga/slabkit/allocator.hpp"
@@ -12,7 +12,6 @@
 #include "detail/arena_impl.hpp"
 #include "detail/os_alloc.hpp"
 #include "detail/pool_impl.hpp"
-#include "detail/queue_state.hpp"
 #include "naga/slabkit/context.hpp"
 #include "naga/slabkit/detail/core.hpp"
 
@@ -63,7 +62,7 @@ void* AllocRoute::raw_allocate(std::size_t bytes, std::size_t align) {
             h = Site::at(kind_, q_, *pool_).storage(bytes, align, align, {});
             if (!h) {
                 // Exhausted or too fragmented: the OS route still works, and
-                // the deferred release recognises the address as not the
+                // the release recognises the address as not the
                 // pool's.
                 h = Site::at(kind_, q_, *dev_).storage(bytes, align, align, {});
             }
@@ -78,7 +77,7 @@ void* AllocRoute::raw_allocate(std::size_t bytes, std::size_t align) {
     if (!h) throw std::bad_alloc{};
 
     // The handle's deleter is dropped here on purpose: an allocator's release
-    // is deferred and decides by address, so carrying a deleter would only
+    // decides by address, so carrying a deleter would only
     // offer a second, immediate way to free -- exactly what deallocate exists
     // to prevent.
     return h.release();
@@ -97,28 +96,21 @@ void AllocRoute::raw_deallocate(void* p, std::size_t bytes,
     if (from_ == from::arena) return;
 
     try {
-        std::shared_ptr<PoolImpl> pool_impl;
-        if (from_ == from::pool) pool_impl = PoolAccess::impl(*pool_);
+        // Waits deps (the container's own last task), then frees here, on the
+        // calling thread. Kernels the caller launched over the memory are the
+        // caller's to wait for.
+        sycl::event::wait(deps);
 
-        const sycl::context ctx = q_.get_context().context_of(*dev_);
-
-        // ONE HOST TASK on the stream's FREES lane, and no wait inside it. It
-        // runs after all the kernel, group and memory work outstanding when
-        // deallocate was called, and after `deps` (the memory work reading
-        // these bytes, which is what the caller passed them for). Nothing
-        // submitted later depends on it -- the bytes are not needed once they
-        // are freed -- so a kernel never waits for a free (a free's cudaFree
-        // waits for the stream, and a kernel that waited for the free would
-        // deadlock it). queue::wait() drains the frees lane.
-        submit_free(state_of(q_), nullptr, deps, [p, bytes, ctx, pool_impl]() mutable {
-            if (pool_impl && pool_impl->owns(p)) {
+        if (from_ == from::pool) {
+            const auto pool_impl = PoolAccess::impl(*pool_);
+            if (pool_impl->owns(p)) {
                 const std::size_t nodes =
                     align_up(bytes, pool_impl->node_size()) / pool_impl->node_size();
                 pool_impl->release(p, nodes);
-            } else {
-                sycl::free(p, ctx);
+                return;
             }
-        });
+        }
+        sycl::free(p, q_.get_context().context_of(*dev_));
     } catch (...) {
         // deallocate is noexcept. Losing the memory is worse than leaking it,
         // but there is nowhere to report from here.

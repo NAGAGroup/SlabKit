@@ -232,7 +232,7 @@ memory — use `usm_vector` instead.
 sk::usm_vector<float> a{n, 1.0f, on_device};    // enqueued, returns immediately
 sk::usm_vector<float> b{a, on_other_device};    // routed copy across devices or kinds
 b = a;                                           // routed copy
-a.resize(2 * n);                                 // old storage released after the work using it
+a.resize(2 * n);                                 // old storage freed once its own copy is done; wait your kernels first
 a.fill(2.0f);
 a.data();                                        // the pointer kernels take
 
@@ -240,9 +240,9 @@ a.data();                                        // the pointer kernels take
 { auto view = b.host_view(); use(view[0]); }     // syncs; read-only; every kind
 ```
 
-Deallocation never happens on your thread: it is posted, and the memory is
-returned after the work using it has finished. So `resize` and destruction
-cannot pull memory out from under a running kernel.
+Deallocation frees on your thread. `usm_vector` first waits for its own last
+task; work you launched over the memory is yours to wait for before the
+container drops it.
 
 Both containers refuse operations between two different streams; use `copy` on
 `data()` with explicit events for that.

@@ -21,10 +21,10 @@
 //   * EVERY COPY IS A ROUTED copy on the container's queue -- between devices,
 //     backends or kinds -- ordered as one task. The caller never sees the route
 //     except in how long it takes.
-//   * OLD STORAGE IS RELEASED THROUGH THE ALLOCATOR'S DEFERRED PATH, carrying
-//     the copy that read it as an explicit dependency, so resize, reserve,
-//     shrink_to_fit, reassignment and destruction never invalidate memory the
-//     stream is still using.
+//   * OLD STORAGE IS FREED SYNCHRONOUSLY once the container's own last task (the
+//     copy that read it) has completed. Kernels the caller launched over data()
+//     are the caller's to wait for before resize, reserve, shrink_to_fit,
+//     reassignment or destruction.
 //
 // RESIZE IS std::vector's CONTRACT VERBATIM: the address changes immediately --
 // the allocation and the swap are host-side -- and the contents catch up, as an
@@ -151,7 +151,7 @@ public:
         same_stream(alloc_, other.alloc_);
 
         if (other.size_ > capacity_) {
-            release_storage();  // deferred: the stream may still hold it
+            release_storage();  // waits for this container's own last task, then frees
             grow_to(other.size_);
         }
         size_ = other.size_;

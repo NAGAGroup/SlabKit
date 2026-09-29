@@ -6,20 +6,14 @@
 //
 // Internal; not installed.
 //
-// THREE sycl::queues, all AdaptiveCpp_retargetable and none constructed with a
+// FOUR sycl::queues, all AdaptiveCpp_retargetable and none constructed with a
 // device: the PRIMARY carries the in-order property and takes kernel tasks and
-// the _in_order memory tasks, the GROUP queue takes a group's subtasks, and the
-// HOST/MEMORY queue takes the asynchronous memory tasks. A submission reaches a
-// device through AdaptiveCpp_retarget, naming the device and the context this
-// stream's slabkit context holds for that device's backend.
-//
-// A FOURTH queue, the FREES lane, takes the deferred release of an allocation.
-// A free runs after everything outstanding when it was submitted (and its
-// caller's dependencies), and NOTHING LATER DEPENDS ON IT: memory is not needed
-// after it is freed. begin_item and open_group therefore never merge this lane
-// (a kernel that waited on a free would park its stream behind a host task whose
-// cudaFree waits for that same stream). Only queue::wait() and wait_and_throw()
-// drain it, and its wait list is part of the stream's wait list.
+// the _in_order memory tasks, the GROUP queue takes a group's subtasks, the
+// HOST/MEMORY queue takes the asynchronous memory tasks, and the LEGS queue is
+// where a staged copy issues its two legs from inside the host task that owns
+// them. A submission reaches a device through AdaptiveCpp_retarget, naming the
+// device and the context this stream's slabkit context holds for that device's
+// backend.
 //
 // There is no ordering state to keep: a queue's own wait list IS the record of
 // what it has outstanding, and merging those lists at submission time is the
@@ -73,10 +67,6 @@ public:
     sycl::queue group_queue;
     sycl::queue host_queue;
 
-    /// Deferred frees (submit_free). Ordered after all other outstanding work,
-    /// merged into nothing but wait().
-    sycl::queue frees;
-
     /// Where a staged copy issues its two legs, from inside the host task that
     /// owns them. Nothing merges against it: the task waits each leg before it
     /// returns, so the task's own event is the whole of that copy's ordering.
@@ -84,15 +74,6 @@ public:
 
     std::shared_ptr<HostErrors> errors;
 };
-
-/// The deferred release of an allocation, on the FREES lane. `f` runs on the
-/// runtime's own threads after every task outstanding on the primary, group and
-/// host/memory queues when this is called, and after `extra`; an exception out
-/// of it is asynchronous (HostErrors), exactly as for any host callable. No
-/// later submission depends on the returned event; wait() drains it. `dev` is
-/// the placement, null for the stream's default device.
-sycl::event submit_free(QueueState& st, const sycl::device* dev,
-                        const std::vector<sycl::event>& extra, std::function<void()> f);
 
 /// A group's captured dependency set and the events of its subtasks. The group
 /// lives inside one submit_group call, and the stream outlives it.
