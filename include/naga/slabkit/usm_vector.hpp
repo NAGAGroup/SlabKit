@@ -254,6 +254,14 @@ public:
 
     /// Syncs, then hands out a mutable host view. Refused for the device kind:
     /// element access there would be a host dereference of device memory.
+    ///
+    /// SHARED KIND ON DEVICES WITHOUT CONCURRENT MANAGED ACCESS (CUDA on WSL2
+    /// and on Windows): the host may not touch ANY shared allocation while ANY
+    /// work is executing on the device -- including work unrelated to this
+    /// container, and work on other streams. get_access() waits for this
+    /// container's own work only. On such platforms, wait every stream that
+    /// uses the device (queue::wait()) before host access to shared memory,
+    /// or prefer device-kind containers with host_view() / from_host().
     host_access<T> get_access() {
         if (get_kind() == kind::device)
             throw std::invalid_argument{

@@ -32,6 +32,15 @@ struct Fixture {
         , dev{sctx.devices().front()}
         , ctx{sctx.context_of(dev)}
         , sq{ctx, dev} {}
+
+    // The test is the user here, and waiting before teardown is the user's
+    // job: nothing this fixture's streams started may outlive it. On CUDA
+    // under WSL2, work left in flight would also make the next test's host
+    // access to shared memory fault.
+    ~Fixture() {
+        q.wait();
+        sq.wait();
+    }
 };
 
 /// Every device the runtime enumerates, across all platforms.

@@ -59,6 +59,11 @@ TEST_CASE("get_access refuses a device-kind container and serves the others", "[
     REQUIRE_THROWS_AS(device.get_access(), std::invalid_argument);
 
     usm_vector<int> shared{4, 1, alloc_of(f, kind::shared)};
+    // Host access to shared memory: on CUDA under WSL2 (no concurrent managed
+    // access) the host may not touch shared memory while anything on the
+    // device is still in flight, and get_access() waits for this container's
+    // own work only. Wait the stream first (README, "Platform notes").
+    f.q.wait();
     auto            access = shared.get_access();
     access[0]              = 42;
     REQUIRE(shared.host_view()[0] == 42);

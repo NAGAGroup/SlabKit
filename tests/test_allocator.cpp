@@ -90,9 +90,11 @@ TEST_CASE("deallocate returns immediately while a long kernel runs, and frees af
     REQUIRE(pool.outstanding() == 1);
 
     // Something long enough that an immediate free would be a use-after-free.
+    // Atomic, so the compiler cannot fold the loop into one add.
     int* busy = sk::malloc_device<int>(1, f.q).release();
     f.q.single_task([=] {
-        for (int spin = 0; spin < 20000000; ++spin) busy[0] = busy[0] + 1;
+        sycl::atomic_ref<int, sycl::memory_order::relaxed, sycl::memory_scope::device> a{busy[0]};
+        for (int spin = 0; spin < 150000000; ++spin) a.fetch_add(1);
     });
 
     const auto before = std::chrono::steady_clock::now();

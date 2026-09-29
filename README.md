@@ -297,3 +297,17 @@ Consuming it:
 find_package(slabkit REQUIRED)
 target_link_libraries(my_target PRIVATE naga::slabkit)
 ```
+
+## Platform notes
+
+### CUDA on WSL2: shared memory
+
+CUDA under WSL2 (as on Windows) has no concurrent managed access. The host may
+not read or write ANY shared-kind (managed) allocation while ANY kernel or copy
+is executing on the GPU, even work that does not touch that allocation, and even
+work on another stream. Doing so is a segmentation fault, typically intermittent.
+
+`usm_vector::get_access()` waits for the container's own work only. On WSL2,
+wait every stream that uses the device (`queue::wait()`) before touching shared
+memory from the host, or use device-kind containers with `host_view()` and
+`from_host()`, which are safe everywhere.
