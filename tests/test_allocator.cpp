@@ -78,6 +78,29 @@ TEST_CASE("the pool route falls back to the runtime when the pool is exhausted",
     f.q.wait();
 }
 
+TEST_CASE("a zero-byte pool serves nothing: every allocation falls back to the runtime and is counted", "[allocator]") {
+    Fixture f;
+
+    DevicePool pool{f.q, kind::device, 0, 256};
+    REQUIRE(pool.slot_count() == 0);
+    REQUIRE(pool.free_count() == 0);
+    allocator<std::byte> alloc{f.q, pool};
+
+    std::byte* a = alloc.allocate(256);
+    std::byte* b = alloc.allocate(100);
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+    REQUIRE(pool.outstanding() == 0);
+    REQUIRE(pool.fallback_allocations() == 2);
+    REQUIRE(pool.fallback_bytes_in_use() == 356);
+
+    alloc.deallocate(a, 256);
+    alloc.deallocate(b, 100);
+    REQUIRE(pool.fallback_bytes_in_use() == 0);
+    REQUIRE(pool.fallback_allocations() == 2);  // cumulative
+    f.q.wait();
+}
+
 TEST_CASE("deallocate with dependencies waits for them, then frees before returning",
           "[allocator]") {
     Fixture f;

@@ -152,6 +152,12 @@ auto guard_host(QueueState& st, F&& f) {
     return guarded_host_fn<std::decay_t<F>>{errors_of(st), std::decay_t<F>{std::forward<F>(f)}};
 }
 
+/// The same, for a stream that keeps its own error list (unordered_queue).
+template <class F>
+auto guard_host(std::shared_ptr<HostErrors> errors, F&& f) {
+    return guarded_host_fn<std::decay_t<F>>{std::move(errors), std::decay_t<F>{std::forward<F>(f)}};
+}
+
 const context&      state_context(const QueueState& st);
 const sycl::device& state_device(const QueueState& st);
 QueueState&         state_of_group(GroupState& gs);

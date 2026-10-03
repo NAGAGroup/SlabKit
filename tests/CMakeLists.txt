@@ -15,7 +15,7 @@ set(SLABKIT_TEST_SOURCES
     test_capabilities.cpp test_context.cpp test_queue.cpp test_host_work.cpp
     test_kinds.cpp test_memory.cpp test_allocator.cpp test_usm_vector.cpp
     test_handles.cpp test_arena.cpp test_pool.cpp test_malloc.cpp
-    test_make.cpp test_make_shared.cpp test_cross_device.cpp
+    test_make.cpp test_make_shared.cpp test_cross_device.cpp test_unordered_queue.cpp
 )
 add_executable(slabkit-tests ${SLABKIT_TEST_SOURCES})
 add_sycl_to_target(TARGET slabkit-tests SOURCES ${SLABKIT_TEST_SOURCES})

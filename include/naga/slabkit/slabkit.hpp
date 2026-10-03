@@ -11,6 +11,8 @@
 //                 answers to what the machine can do
 //   queue         one in-order stream over that context, with placement,
 //                 concurrent groups, host callables and memory work
+//   unordered_queue  one out-of-order stream: kernels and host callables,
+//                 ordered only by the events they are given
 //   malloc_*      uninitialized storage, SYCL's names and signatures
 //   make_*        constructed objects, std::make_unique's forms
 //   DeviceArena   a bump region over one slab
@@ -33,4 +35,5 @@
 #include "naga/slabkit/malloc.hpp"
 #include "naga/slabkit/pool.hpp"
 #include "naga/slabkit/queue.hpp"
+#include "naga/slabkit/unordered_queue.hpp"
 #include "naga/slabkit/usm_vector.hpp"

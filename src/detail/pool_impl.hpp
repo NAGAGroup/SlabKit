@@ -28,6 +28,7 @@
 //
 // Thread safety: every mutating entry point takes the mutex.
 
+#include <atomic>
 #include <bit>
 #include <cassert>
 #include <cstddef>
@@ -59,6 +60,10 @@ public:
         if (!is_power_of_two(node_size))
             throw std::invalid_argument{
                 "naga::slabkit::DevicePool: node_size must be a power of two"};
+
+        // A pool of less than one node (zero bytes included) is legal: it owns no slab, serves nothing, and every
+        // allocation through its route falls back to the OS and is counted.
+        if (slot_count_ == 0) return;
 
         // One extra node of slack so the grid can start at an aligned address.
         slab_ = os_allocate(k, node_size, bytes + node_size, dev, ctx, props);
@@ -133,6 +138,16 @@ public:
         std::lock_guard<std::mutex> lock{mutex_};
         return slot_count_ - free_count_;
     }
+
+    /// The OS fallback of this pool's allocator route: the number of allocations ever sent to the OS because the pool
+    /// could not serve them (cumulative), and the bytes of those still live.
+    std::size_t fallback_allocations() const noexcept { return fallback_allocations_.load(std::memory_order_relaxed); }
+    std::size_t fallback_bytes_in_use() const noexcept { return fallback_bytes_.load(std::memory_order_relaxed); }
+    void        add_fallback(std::size_t bytes) noexcept {
+        fallback_allocations_.fetch_add(1, std::memory_order_relaxed);
+        fallback_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    }
+    void sub_fallback(std::size_t bytes) noexcept { fallback_bytes_.fetch_sub(bytes, std::memory_order_relaxed); }
 
     const sycl::device&  device() const noexcept { return dev_; }
     const sycl::context& context() const noexcept { return ctx_; }
@@ -268,6 +283,9 @@ private:
     std::vector<std::uint64_t> l1_;  // one bit per 64-slot group, 1 = has a free slot
 
     mutable std::mutex mutex_;
+
+    std::atomic<std::size_t> fallback_allocations_{0};  // cumulative
+    std::atomic<std::size_t> fallback_bytes_{0};        // live
 };
 
 }  // namespace naga::slabkit::detail
