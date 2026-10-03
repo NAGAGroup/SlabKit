@@ -163,6 +163,9 @@ TEST_CASE("a kernel with a dependency does not run until the event completes", "
 TEST_CASE("a kernel without dependencies is not ordered after earlier work on the stream",
           "[unordered_queue]") {
     UFixture u;
+    // No equivalent of slabkit's detail::is_host_backend exists in the library or the tests, so the backend is read directly.
+    if (u.f.dev.get_backend() == sycl::backend::omp)
+        SKIP("the OpenMP backend never runs two kernels at once, so unordered-ness can't be observed here");
     warm_up(u);
     int* out = u.host_int(0);
     Gate g{u, /*on_stream=*/true};  // submitted FIRST, spinning on the stream itself
