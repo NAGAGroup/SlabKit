@@ -114,14 +114,42 @@ bool wait_done(const sycl::event& e, std::chrono::milliseconds limit = std::chro
 
 allocator<int> device_alloc(const Fixture& f) { return allocator<int>{f.q, kind::device, f.dev}; }
 
+/// The task the tests gate: *p = v. A named type, so every test launches the SAME kernel and warm_up can load it.
+struct SetTo {
+    int* p;
+    int  v;
+    void operator()() const { *p = v; }
+};
+
+/// Launches every kernel a gating test uses once, with nothing held back, and waits.
+///
+/// A kernel's FIRST launch JIT-compiles and loads its module, and on a device backend that can block the submitting
+/// call behind work already running on the device. A test that submits a task while a Gate spins would then hang
+/// in submit() instead of exercising ordering. Warmed up, the submission returns at once and only the ordering under
+/// test decides when the task runs.
+void warm_up(UFixture& u) {
+    int* scratch = u.host_int(0);
+    {
+        Gate on_stream{u, /*on_stream=*/true};
+        on_stream.open();
+        on_stream.event.wait();
+        Gate off_stream{u, /*on_stream=*/false};
+        off_stream.open();
+        off_stream.event.wait();
+    }
+    u.uq.single_task(SetTo{scratch, 0}).wait();
+    u.uq.wait();
+}
+
 }  // namespace
 
 TEST_CASE("a kernel with a dependency does not run until the event completes", "[unordered_queue]") {
     UFixture u;
-    int*     out = u.host_int(0);
-    Gate     g{u, /*on_stream=*/false};
+    warm_up(u);
+    int* out = u.host_int(0);
+    Gate g{u, /*on_stream=*/false};
 
-    sycl::event e = u.uq.single_task(std::vector<sycl::event>{g.event}, [=] { *out = 1; });
+    sycl::event e = u.uq.single_task(std::vector<sycl::event>{g.event}, SetTo{out, 1});
 
     settle();
     CHECK(*out == 0);
@@ -135,11 +163,12 @@ TEST_CASE("a kernel with a dependency does not run until the event completes", "
 TEST_CASE("a kernel without dependencies is not ordered after earlier work on the stream",
           "[unordered_queue]") {
     UFixture u;
-    int*     out = u.host_int(0);
-    Gate     g{u, /*on_stream=*/true};  // submitted FIRST, spinning on the stream itself
+    warm_up(u);
+    int* out = u.host_int(0);
+    Gate g{u, /*on_stream=*/true};  // submitted FIRST, spinning on the stream itself
 
     // Nothing is merged: this task is not held back by the gate before it.
-    sycl::event e = u.uq.single_task([=] { *out = 1; });
+    sycl::event e = u.uq.single_task(SetTo{out, 1});
 
     const bool finished = wait_done(e);
     const bool gate_closed = !is_done(g.event);
@@ -178,10 +207,11 @@ TEST_CASE("an async_host task runs after its dependency, and its exception surfa
 
 TEST_CASE("wait returns only after all submitted work has finished", "[unordered_queue]") {
     UFixture u;
-    int*     out = u.host_int(0);
-    Gate     g{u, /*on_stream=*/true};
+    warm_up(u);
+    int* out = u.host_int(0);
+    Gate g{u, /*on_stream=*/true};
 
-    sycl::event after = u.uq.single_task(std::vector<sycl::event>{g.event}, [=] { *out = 7; });
+    sycl::event after = u.uq.single_task(std::vector<sycl::event>{g.event}, SetTo{out, 7});
 
     // wait() blocks the calling thread, so it runs on its own; the gate opens
     // only after we have seen it still waiting.
@@ -252,6 +282,7 @@ TEST_CASE("a queue reports its context and its default device, and compares by s
 TEST_CASE("usm_vector::events includes registered events, and a task depending on it waits",
           "[unordered_queue][usm_vector]") {
     UFixture        u;
+    warm_up(u);
     int*            out = u.host_int(0);
     usm_vector<int> v{8, 1, device_alloc(u.f)};  // before the gate: the gate is destroyed first
     v.sync();
@@ -262,7 +293,7 @@ TEST_CASE("usm_vector::events includes registered events, and a task depending o
     const std::vector<sycl::event> evs = v.events();
     REQUIRE(evs.size() == 2);  // last event + the registered one
 
-    sycl::event e = u.uq.single_task(evs, [=] { *out = 1; });
+    sycl::event e = u.uq.single_task(evs, SetTo{out, 1});
 
     settle();
     CHECK(*out == 0);
