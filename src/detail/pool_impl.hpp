@@ -61,6 +61,10 @@ public:
             throw std::invalid_argument{
                 "naga::slabkit::DevicePool: node_size must be a power of two"};
 
+        // A pool of less than one node (zero bytes included) is legal: it owns no slab, serves nothing, and every
+        // allocation through its route falls back to the OS and is counted.
+        if (slot_count_ == 0) return;
+
         // One extra node of slack so the grid can start at an aligned address.
         slab_ = os_allocate(k, node_size, bytes + node_size, dev, ctx, props);
         if (!slab_) {

@@ -32,7 +32,9 @@ struct PoolAccess;
 
 class DevicePool {
 public:
-    /// PRIMARY. \throws std::invalid_argument if node_size is not a power of two.
+    /// PRIMARY. \throws std::invalid_argument if node_size is not a power of two. A pool of 0 bytes (or less than one
+    /// node) is legal: it has no slots and no slab, serves nothing, and every allocation through its allocator route falls
+    /// back to the OS and is counted (fallback_allocations / fallback_bytes_in_use).
     DevicePool(const queue& q, const sycl::device& dev, kind k, std::size_t bytes,
                std::size_t node_size = 1024, const sycl::property_list& props = {});
 
