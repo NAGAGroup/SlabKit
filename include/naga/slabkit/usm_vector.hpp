@@ -301,6 +301,13 @@ public:
     bool        empty() const { return size_ == 0; }
     sycl::event last_event() const { return last_; }
 
+    /// What a submission that touches this container's data should depend on: the
+    /// container's last event plus every event registered on it. A caller that
+    /// reads or writes data() on a queue of its own passes this list to that
+    /// submission, so the work comes after everything the container is still
+    /// waiting for.
+    std::vector<sycl::event> events() const { return mine(); }
+
     T*       data() { return data_; }
     const T* data() const { return data_; }
 
