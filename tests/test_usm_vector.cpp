@@ -4,9 +4,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <memory>
 #include <span>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "naga/slabkit/slabkit.hpp"
@@ -21,6 +25,60 @@ namespace {
 allocator<int> alloc_of(const Fixture& f, kind k) {
     return k == kind::host ? allocator<int>{f.q, k} : allocator<int>{f.q, k, f.dev};
 }
+
+// ---- a controllable outside event --------------------------------------------
+//
+// A kernel on the fixture's RAW sycl queue -- outside the slabkit stream, whose
+// memory tasks would otherwise be ordered after any kernel on it -- that spins
+// until the host flips a flag in host USM, then writes 100 over `n` ints at
+// `target`. Its event is the "outside work". Declare a Gate AFTER the containers
+// it is registered on: it is destroyed first and opens itself, so a failing
+// REQUIRE cannot leave a container's destructor waiting on a gate nobody opens.
+class Gate {
+public:
+    sycl::event event;
+
+    explicit Gate(Fixture& f, int* target = nullptr, std::size_t n = 0)
+        : f_{f}, flag_{sycl::malloc_host<int>(1, f.ctx)} {
+        REQUIRE(flag_ != nullptr);
+        *flag_ = 0;
+        int* flag = flag_;
+        event     = f_.sq.single_task([=] {
+            sycl::atomic_ref<int, sycl::memory_order::relaxed, sycl::memory_scope::system> a{
+                *flag};
+            while (a.load() == 0) {
+            }
+            for (std::size_t i = 0; i < n; ++i) target[i] = 100;
+        });
+    }
+
+    Gate(const Gate&)            = delete;
+    Gate& operator=(const Gate&) = delete;
+
+    void open() { std::atomic_ref<int>{*flag_}.store(1); }
+
+    ~Gate() {
+        if (flag_ == nullptr) return;
+        open();
+        event.wait();
+        sycl::free(flag_, f_.ctx);
+    }
+
+    std::span<const sycl::event> as_deps() const { return std::span<const sycl::event>{&event, 1}; }
+
+private:
+    Fixture& f_;
+    int*     flag_;
+};
+
+bool is_done(const sycl::event& e) {
+    return e.get_info<sycl::info::event::command_execution_status>() ==
+           sycl::info::event_command_status::complete;
+}
+
+/// Long enough that an operation which does not wait for the gate would have
+/// finished by now.
+void settle() { std::this_thread::sleep_for(std::chrono::milliseconds{150}); }
 
 }  // namespace
 
@@ -260,4 +318,260 @@ TEST_CASE("a container's elements are visible to a kernel on its own stream",
     f.q.wait();
 
     for (int x : v.host_view()) REQUIRE(x == 6);
+}
+
+// -----------------------------------------------------------------------------
+// Registered events: outside work the container orders itself after
+// -----------------------------------------------------------------------------
+
+TEST_CASE("a registered event delays a later fill, resize or copy-assign",
+          "[usm_vector][events]") {
+    Fixture         f;
+    usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+    v.reserve(64);  // room to grow in place: a reallocation frees, and the free waits
+    v.sync();
+
+    // In each case the gate's kernel overwrites the target with 100 once it is
+    // opened, so a task that did not come after it leaves 100 behind.
+
+    SECTION("fill") {
+        Gate g{f, v.data(), 8};
+        v.register_event(g.event);
+
+        sycl::event e = v.fill(5);
+        settle();
+        REQUIRE_FALSE(is_done(e));
+        REQUIRE_FALSE(is_done(g.event));
+
+        g.open();
+        e.wait();
+        for (int x : v.host_view()) REQUIRE(x == 5);
+    }
+
+    SECTION("resize") {
+        Gate g{f, v.data() + 8, 8};
+        v.register_event(g.event);
+
+        sycl::event e = v.resize(16, 9);
+        settle();
+        REQUIRE_FALSE(is_done(e));
+
+        g.open();
+        e.wait();
+        const auto view = v.host_view();
+        REQUIRE(view.size() == 16);
+        for (std::size_t i = 0; i < 8; ++i) REQUIRE(view[i] == 1);
+        for (std::size_t i = 8; i < 16; ++i) REQUIRE(view[i] == 9);
+    }
+
+    SECTION("copy-assign") {
+        usm_vector<int> src{8, 3, alloc_of(f, kind::device)};
+        src.sync();
+        Gate g{f, v.data(), 8};
+        v.register_event(g.event);
+
+        v                   = src;
+        sycl::event e = v.last_event();
+        settle();
+        REQUIRE_FALSE(is_done(e));
+
+        g.open();
+        e.wait();
+        for (int x : v.host_view()) REQUIRE(x == 3);
+    }
+}
+
+TEST_CASE("the free waits on registered events", "[usm_vector][events]") {
+    Fixture f;
+    auto    v = std::make_unique<usm_vector<int>>(8, 1, alloc_of(f, kind::device));
+    v->sync();
+    Gate g{f};
+    v->register_event(g.event);
+
+    // The destructor blocks the calling thread, so it runs on its own; the
+    // gate opens only after we have seen it still waiting.
+    std::atomic<bool> freed{false};
+    std::thread       t{[&] {
+        v.reset();
+        freed = true;
+    }};
+    settle();
+    const bool freed_early = freed.load();
+    g.open();
+    t.join();
+
+    REQUIRE_FALSE(freed_early);
+    REQUIRE(freed.load());
+    REQUIRE(is_done(g.event));
+}
+
+TEST_CASE("copy-assign from a source with registered events waits on them",
+          "[usm_vector][events]") {
+    Fixture         f;
+    usm_vector<int> src{8, 3, alloc_of(f, kind::device)};
+    usm_vector<int> dst{8, 0, alloc_of(f, kind::device)};
+    src.sync();
+    dst.sync();
+
+    // The gate rewrites the SOURCE to 100 after it opens. The copy reads the
+    // source, so it must come after that: the destination ends up 100, not 3.
+    Gate g{f, src.data(), 8};
+    src.register_event(g.event);
+    REQUIRE(src.registered_event_count() == 1);
+
+    dst                 = src;
+    sycl::event e = dst.last_event();
+    settle();
+    REQUIRE_FALSE(is_done(e));
+    REQUIRE(src.registered_event_count() == 0);  // the copy is now the source's last event
+
+    g.open();
+    e.wait();
+    for (int x : dst.host_view()) REQUIRE(x == 100);
+}
+
+TEST_CASE("sync covers registered events", "[usm_vector][events]") {
+    Fixture         f;
+    usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+    v.sync();
+    Gate g{f};
+    v.register_event(g.event);
+
+    std::atomic<bool> synced{false};
+    std::thread       t{[&] {
+        v.sync();
+        synced = true;
+    }};
+    settle();
+    const bool synced_early = synced.load();
+    g.open();
+    t.join();
+
+    REQUIRE_FALSE(synced_early);
+    REQUIRE(synced.load());
+    REQUIRE(is_done(g.event));
+}
+
+TEST_CASE("the extra-dependency overloads order after the given events",
+          "[usm_vector][events]") {
+    Fixture         f;
+    usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+    v.reserve(64);
+    v.sync();
+
+    // Nothing is registered here: the events are passed to the one call, which
+    // is ordered after them and does not keep them.
+
+    SECTION("fill(value, deps)") {
+        Gate g{f, v.data(), 8};
+        sycl::event e = v.fill(5, g.as_deps());
+        settle();
+        REQUIRE_FALSE(is_done(e));
+        REQUIRE(v.registered_event_count() == 0);
+
+        g.open();
+        e.wait();
+        for (int x : v.host_view()) REQUIRE(x == 5);
+    }
+
+    SECTION("resize(n, deps)") {
+        Gate g{f, v.data() + 8, 8};
+        sycl::event e = v.resize(16, g.as_deps());
+        settle();
+        REQUIRE_FALSE(is_done(e));
+
+        g.open();
+        e.wait();
+        const auto view = v.host_view();
+        REQUIRE(view.size() == 16);
+        for (std::size_t i = 8; i < 16; ++i) REQUIRE(view[i] == 0);
+    }
+
+    SECTION("resize(n, value, deps)") {
+        Gate g{f, v.data() + 8, 8};
+        sycl::event e = v.resize(16, 9, g.as_deps());
+        settle();
+        REQUIRE_FALSE(is_done(e));
+
+        g.open();
+        e.wait();
+        const auto view = v.host_view();
+        REQUIRE(view.size() == 16);
+        for (std::size_t i = 8; i < 16; ++i) REQUIRE(view[i] == 9);
+    }
+
+    SECTION("from_host(src, deps)") {
+        Gate                   g{f, v.data(), 8};
+        const std::vector<int> src(8, 4);
+        sycl::event e = v.from_host(std::span<const int>{src}, g.as_deps());
+        settle();
+        REQUIRE_FALSE(is_done(e));
+
+        g.open();
+        e.wait();
+        for (int x : v.host_view()) REQUIRE(x == 4);
+    }
+
+    SECTION("assign(other, deps)") {
+        usm_vector<int> src{8, 3, alloc_of(f, kind::device)};
+        src.sync();
+        Gate g{f, v.data(), 8};
+        sycl::event e = v.assign(src, g.as_deps());
+        settle();
+        REQUIRE_FALSE(is_done(e));
+        REQUIRE(e == v.last_event());
+
+        g.open();
+        e.wait();
+        for (int x : v.host_view()) REQUIRE(x == 3);
+    }
+}
+
+TEST_CASE("completed events are pruned on registration", "[usm_vector][events]") {
+    Fixture         f;
+    usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+    usm_vector<int> moved{alloc_of(f, kind::device)};  // before the gates, so they outlive it
+    v.sync();
+
+    // Completed events, made BEFORE any gate: a kernel submitted to the raw
+    // queue while a gate spins on it would queue behind the gate.
+    std::vector<sycl::event> finished;
+    for (int i = 0; i < 5; ++i) {
+        finished.push_back(f.sq.single_task([] {}));
+        finished.back().wait();
+    }
+
+    REQUIRE(v.registered_event_count() == 0);
+    v.register_event(finished[0]);
+    REQUIRE(v.registered_event_count() == 1);
+
+    // The completed one is dropped first, then the new one is appended.
+    v.register_event(finished[1]);
+    REQUIRE(v.registered_event_count() == 1);
+
+    // A pending event survives later registrations; completed ones do not.
+    Gate g{f};
+    v.register_event(g.event);
+    REQUIRE(v.registered_event_count() == 1);  // the completed one was dropped
+    v.register_event(finished[2]);
+    REQUIRE(v.registered_event_count() == 2);  // gate + the new one
+    v.register_events(std::span<const sycl::event>{finished.data() + 3, 2});
+    REQUIRE(v.registered_event_count() == 3);  // gate + the two new ones; the old one dropped
+
+    // A mutation depends on all of them, so it forgets them.
+    sycl::event e = v.fill(2);
+    REQUIRE(v.registered_event_count() == 0);
+    settle();
+    REQUIRE_FALSE(is_done(e));
+
+    // Registered events travel with a move.
+    Gate g2{f};
+    v.register_event(g2.event);
+    moved = std::move(v);
+    REQUIRE(moved.registered_event_count() == 1);
+    REQUIRE(v.registered_event_count() == 0);
+
+    g.open();
+    g2.open();
+    moved.sync();
 }
