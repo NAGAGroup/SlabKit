@@ -56,6 +56,12 @@ public:
     /// Slots currently handed out. Information, not a lifetime signal.
     std::size_t outstanding() const;
 
+    /// Allocations made through this pool's route that the pool could not serve (it was full or too fragmented), which
+    /// went to the OS instead. CUMULATIVE: the count of such allocations ever made.
+    std::size_t fallback_allocations() const;
+    /// The bytes of those OS allocations that are still LIVE (a release subtracts them).
+    std::size_t fallback_bytes_in_use() const;
+
     const sycl::device&  device() const;
     const sycl::context& context() const;
 

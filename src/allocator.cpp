@@ -65,6 +65,8 @@ void* AllocRoute::raw_allocate(std::size_t bytes, std::size_t align) {
                 // the release recognises the address as not the
                 // pool's.
                 h = Site::at(kind_, q_, *dev_).storage(bytes, align, align, {});
+                // Counted for the pool's report: one more fallback allocation, `bytes` live until it is released.
+                if (h) PoolAccess::impl(*pool_)->add_fallback(bytes);
             }
             break;
         case from::os:
@@ -107,6 +109,7 @@ void AllocRoute::raw_deallocate(void* p, std::size_t bytes,
                 pool_impl->release(p, nodes);
                 return;
             }
+            pool_impl->sub_fallback(bytes);  // not the pool's: one of its OS fallbacks goes back
         }
         sycl::free(p, q_.get_context().context_of(*dev_));
     } catch (...) {

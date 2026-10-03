@@ -36,6 +36,8 @@ std::size_t DevicePool::node_size() const { return impl_->node_size(); }
 std::size_t DevicePool::slot_count() const { return impl_->slot_count(); }
 std::size_t DevicePool::free_count() const { return impl_->free_count(); }
 std::size_t DevicePool::outstanding() const { return impl_->outstanding(); }
+std::size_t DevicePool::fallback_allocations() const { return impl_->fallback_allocations(); }
+std::size_t DevicePool::fallback_bytes_in_use() const { return impl_->fallback_bytes_in_use(); }
 
 const sycl::device&  DevicePool::device() const { return impl_->device(); }
 const sycl::context& DevicePool::context() const { return impl_->context(); }
