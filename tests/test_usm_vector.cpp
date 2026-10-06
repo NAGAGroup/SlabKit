@@ -821,6 +821,54 @@ TEST_CASE("the event lists travel with a move", "[usm_vector][events]") {
     REQUIRE(wait_done(e));
 }
 
+TEST_CASE("a list is collapsed by the registration that makes it longer than 64 events",
+          "[usm_vector][events]") {
+    Fixture f;
+    warm_up(f);
+
+    usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+    v.sync();
+
+    // Completed events: nothing to wait for, so only the bookkeeping shows.
+    std::vector<sycl::event> done;
+    for (int i = 0; i < 70; ++i) {
+        done.push_back(f.sq.single_task([] {}));
+        done.back().wait();
+    }
+    const std::size_t cap = usm_vector<int>::max_listed_events;
+    REQUIRE(cap == 64);
+
+    SECTION("reads, one at a time") {
+        REQUIRE(v.read_list_size() == 0);
+        for (std::size_t i = 0; i < cap; ++i) v.register_read(done[i]);
+        REQUIRE(v.read_list_size() == cap);  // at the cap: not yet collapsed
+        v.register_read(done[cap]);
+        REQUIRE(v.read_list_size() == 1);  // the 65th collapsed them all
+        for (std::size_t i = cap + 1; i < done.size(); ++i) v.register_read(done[i]);
+        REQUIRE(v.read_list_size() == 1 + (done.size() - cap - 1));
+    }
+
+    SECTION("writes, as one span") {
+        // The write list starts with the container's own fill.
+        v.register_write(std::span<const sycl::event>{done.data(), 70});
+        REQUIRE(v.write_list_size() == 1);  // 71 events collapsed on the spot
+    }
+
+    SECTION("the collapsed event still covers the events it replaced") {
+        Gate g{f};
+        v.register_read(g.event);
+        for (std::size_t i = 0; i < cap; ++i) v.register_read(done[i]);  // the 65th event
+        REQUIRE(v.read_list_size() == 1);
+
+        const std::vector<sycl::event> deps = v.write_deps();
+        REQUIRE(deps.size() == 1);
+        settle();
+        REQUIRE_FALSE(is_done(deps.front()));
+        g.open();
+        REQUIRE(wait_done(deps.front()));
+    }
+}
+
 TEST_CASE("the extra-dependency overloads order after the given events",
           "[usm_vector][events]") {
     Fixture f;

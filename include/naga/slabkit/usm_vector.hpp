@@ -40,8 +40,9 @@
 // COLLAPSE ON ACCESS. Whenever a list that holds more than one event is read,
 // the container submits an empty single_task on its queue that depends on all
 // of them, replaces the list with that one event and uses it. A list of zero or
-// one events is used as is. Lists only grow between accesses; nothing else
-// clears them (a free, which has waited on everything, empties both).
+// one events is used as is. Lists only grow between accesses, except that a
+// registration that makes a list longer than 64 events collapses it on the spot;
+// nothing else clears them (a free, which has waited on everything, empties both).
 //
 // Two properties make this safe to use with work still in flight:
 //
@@ -303,17 +304,35 @@ public:
 
     /// Hands the container the event of outside work that reads data(). Later
     /// writes to the container come after it.
-    void register_read(const sycl::event& e) { reads_.push_back(e); }
+    void register_read(const sycl::event& e) {
+        reads_.push_back(e);
+        cap(reads_);
+    }
     void register_read(std::span<const sycl::event> evs) {
         reads_.insert(reads_.end(), evs.begin(), evs.end());
+        cap(reads_);
     }
 
     /// Hands the container the event of outside work that writes data(). Later
     /// reads of, and writes to, the container come after it.
-    void register_write(const sycl::event& e) { writes_.push_back(e); }
+    void register_write(const sycl::event& e) {
+        writes_.push_back(e);
+        cap(writes_);
+    }
     void register_write(std::span<const sycl::event> evs) {
         writes_.insert(writes_.end(), evs.begin(), evs.end());
+        cap(writes_);
     }
+
+    /// A list longer than this is collapsed by the registration that made it so,
+    /// so a container that is registered on again and again but never accessed
+    /// (read every step, never written) does not grow without bound.
+    static constexpr size_type max_listed_events = 64;
+
+    /// How many events each list currently holds (a diagnostic: the lists
+    /// collapse on access and at max_listed_events).
+    size_type read_list_size() const { return reads_.size(); }
+    size_type write_list_size() const { return writes_.size(); }
 
     void reserve(size_type n) {
         if (n <= capacity_) return;
@@ -399,6 +418,11 @@ private:
     sycl::event join(const std::vector<sycl::event>& deps) const {
         if (get_kind() == kind::host) return queue_().single_task(deps, detail::collapse_noop{});
         return queue_().single_task(alloc_.get_device(), deps, detail::collapse_noop{});
+    }
+
+    /// Collapses a list that registration pushed past max_listed_events.
+    void cap(std::vector<sycl::event>& list) const {
+        if (list.size() > max_listed_events) collapsed(list);
     }
 
     /// The list, as events to depend on. A list holding more than one event is
