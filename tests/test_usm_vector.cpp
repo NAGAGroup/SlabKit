@@ -4,6 +4,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -119,7 +120,7 @@ void warm_up(Fixture& f) {
         g.event.wait();
         scratch.register_write(g.event);  // the write list now holds two events
     }
-    scratch.sync();  // collapsing them launches the join task
+    scratch.sync();
     f.q.single_task(scratch.read_deps(), Poke{scratch.data(), 0}).wait();
     f.q.wait();
     f.sq.wait();
@@ -648,8 +649,9 @@ TEST_CASE("assign orders against both containers", "[usm_vector][events]") {
         CHECK(wd.front() == e);
         // ...and it is a write of dst, so a reader of dst waits on it too.
         const std::vector<sycl::event> rd = dst.read_deps();
-        REQUIRE(rd.size() == 1);
-        CHECK_FALSE(is_done(rd.front()));
+        REQUIRE(rd.size() == 2);  // dst's own construction fill, then the copy
+        CHECK(rd.back() == e);
+        CHECK_FALSE(is_done(rd.back()));
 
         g.open();
         REQUIRE(wait_done(e));
@@ -685,7 +687,7 @@ TEST_CASE("assign orders against both containers", "[usm_vector][events]") {
     }
 }
 
-TEST_CASE("a collapsed event covers every event it replaced", "[usm_vector][events]") {
+TEST_CASE("an event list is handed out whole: every registered event is in it", "[usm_vector][events]") {
     Fixture f;
     warm_up(f);
 
@@ -694,6 +696,12 @@ TEST_CASE("a collapsed event covers every event it replaced", "[usm_vector][even
     Gate g1{f};
     Gate g2{f};
     Gate g3{f};
+    const auto has    = [](const std::vector<sycl::event>& l, const sycl::event& e) {
+        return std::find(l.begin(), l.end(), e) != l.end();
+    };
+    const auto all_done = [](const std::vector<sycl::event>& l) {
+        return std::all_of(l.begin(), l.end(), [](const sycl::event& e) { return is_done(e); });
+    };
 
     SECTION("the write list, read through read_deps") {
         v.register_write(g1.event);
@@ -701,44 +709,41 @@ TEST_CASE("a collapsed event covers every event it replaced", "[usm_vector][even
         v.register_write(g3.event);
 
         const std::vector<sycl::event> deps = v.read_deps();
-        REQUIRE(deps.size() == 1);
-        const sycl::event joined = deps.front();
-        // Read again, the list is already the one event: nothing new is joined.
-        REQUIRE(v.read_deps().front() == joined);
+        REQUIRE(deps.size() == 4);  // the container's own fill and the three registered writes
+        CHECK(has(deps, g1.event));
+        CHECK(has(deps, g2.event));
+        CHECK(has(deps, g3.event));
 
         g1.open();
         g2.open();
         settle();
-        REQUIRE_FALSE(is_done(joined));  // the third gate still holds it
+        REQUIRE_FALSE(all_done(deps));  // the third gate is still open
 
         g3.open();
-        REQUIRE(wait_done(joined));
-        CHECK(is_done(g1.event));
-        CHECK(is_done(g2.event));
-        CHECK(is_done(g3.event));
+        for (const sycl::event& e : deps) REQUIRE(wait_done(e));
     }
 
-    SECTION("the read list, read through write_deps") {
+    SECTION("the read list and the container's own writes, read through write_deps") {
         v.register_read(g1.event);
         v.register_read(g2.event);
         v.register_read(g3.event);
 
-        // The joined read list, then the container's own construction fill.
         const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE(deps.size() == 2);
-        const sycl::event joined = deps.front();
-        REQUIRE(v.write_deps().front() == joined);
+        REQUIRE(deps.size() == 4);  // the three registered reads, then the container's own construction fill
+        CHECK(has(deps, g1.event));
+        CHECK(has(deps, g2.event));
+        CHECK(has(deps, g3.event));
 
         g1.open();
         g3.open();
         settle();
-        REQUIRE_FALSE(is_done(joined));  // the second gate still holds it
+        REQUIRE_FALSE(all_done(deps));  // the second gate is still closed
 
         g2.open();
-        REQUIRE(wait_done(joined));
+        for (const sycl::event& e : deps) REQUIRE(wait_done(e));
     }
 
-    SECTION("a task depending on the collapsed event waits for all of them") {
+    SECTION("a task depending on the list waits for all of them") {
         v.register_write(g1.event);
         v.register_write(g2.event);
         v.register_write(g3.event);
@@ -892,7 +897,7 @@ TEST_CASE("the event lists travel with a move", "[usm_vector][events]") {
     REQUIRE(wait_done(e));
 }
 
-TEST_CASE("a list is collapsed by the registration that makes it longer than 64 events",
+TEST_CASE("a registration that makes a list longer than 64 events drops the completed ones",
           "[usm_vector][events]") {
     Fixture f;
     warm_up(f);
@@ -912,27 +917,28 @@ TEST_CASE("a list is collapsed by the registration that makes it longer than 64 
     SECTION("reads, one at a time") {
         REQUIRE(v.read_list_size() == 0);
         for (std::size_t i = 0; i < cap; ++i) v.register_read(done[i]);
-        REQUIRE(v.read_list_size() == cap);  // at the cap: not yet collapsed
+        REQUIRE(v.read_list_size() == cap);  // at the cap: nothing dropped yet
         v.register_read(done[cap]);
-        REQUIRE(v.read_list_size() == 1);  // the 65th collapsed them all
+        REQUIRE(v.read_list_size() == 0);  // the 65th dropped them all: every one has completed
         for (std::size_t i = cap + 1; i < done.size(); ++i) v.register_read(done[i]);
-        REQUIRE(v.read_list_size() == 1 + (done.size() - cap - 1));
+        REQUIRE(v.read_list_size() == done.size() - cap - 1);
     }
 
     SECTION("writes, as one span") {
-        // The write list starts with the container's own fill.
+        // The write list starts with the container's own fill, which has completed too.
         v.register_write(std::span<const sycl::event>{done.data(), 70});
-        REQUIRE(v.write_list_size() == 1);  // 71 events collapsed on the spot
+        REQUIRE(v.write_list_size() == 0);  // 71 events, all complete, dropped on the spot
     }
 
-    SECTION("the collapsed event still covers the events it replaced") {
+    SECTION("an event still in flight is kept") {
         Gate g{f};
         v.register_read(g.event);
         for (std::size_t i = 0; i < cap; ++i) v.register_read(done[i]);  // the 65th event
-        REQUIRE(v.read_list_size() == 1);
+        REQUIRE(v.read_list_size() == 1);  // only the gate's
 
         const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE(deps.size() == 2);  // the collapsed read list, and the construction fill
+        REQUIRE(deps.size() == 2);  // the gate's event, and the construction fill
+        CHECK(deps.front() == g.event);
         settle();
         REQUIRE_FALSE(is_done(deps.front()));
         g.open();

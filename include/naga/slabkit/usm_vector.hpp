@@ -41,12 +41,17 @@
 //   * the free (destruction, reassignment, reallocation) and sync() wait on
 //     both lists.
 //
-// COLLAPSE ON ACCESS. Whenever a list that holds more than one event is read,
-// the container submits an empty single_task on its queue that depends on all
-// of them, replaces the list with that one event and uses it. A list of zero or
-// one events is used as is. Lists only grow between accesses, except that a
-// registration that makes a list longer than 64 events collapses it on the spot;
-// nothing else clears them (a free, which has waited on everything, empties both).
+// NO COLLAPSE. A list is handed out as it is: read_deps() and write_deps() return
+// every event in the list, and the caller depends on all of them. Nothing is
+// submitted to join them: with a join task (an empty single_task over the list,
+// or one that increments a counter) CoSpan's tests saw dependent work read stale
+// data about half the time on the OpenMP backend of AdaptiveCpp, and without it
+// never. A standalone test of the join against a spinning kernel on an unordered
+// stream did NOT reproduce it, so the cause is not established. A registration
+// that makes a list longer than 64
+// events drops the events that have COMPLETED (they order nothing); events still
+// in flight stay however many there are. A free, which has waited on everything,
+// empties the lists.
 //
 // Two properties make this safe to use with work still in flight:
 //
@@ -83,16 +88,6 @@
 #include "naga/slabkit/queue.hpp"
 
 namespace naga::slabkit {
-
-namespace detail {
-
-/// The empty task that joins an event list into one event. A named type, so
-/// every container element type launches the same kernel.
-struct collapse_noop {
-    void operator()() const {}
-};
-
-}  // namespace detail
 
 /// A mutable host view of a container's elements. Only shared and host kinds
 /// can hand one out; the container synchronized before it did.
@@ -301,18 +296,16 @@ public:
     // Event lists — what outside work waits on, and what it hands over
     // -------------------------------------------------------------------------
 
-    /// What an outside READER of data() must wait on: the write list, collapsed
-    /// to one event if it held several. Empty when nothing has written.
-    std::vector<sycl::event> read_deps() const { return collapsed(writes_); }
+    /// What an outside READER of data() must wait on: every event of the write
+    /// list. Empty when nothing has written.
+    std::vector<sycl::event> read_deps() const { return writes_; }
 
-    /// What an outside WRITER of data() must wait on: the read list and the
-    /// container's own writes, each collapsed to one event if it held several.
-    /// Empty when nothing has read and the container has not written. Outside
-    /// writes never wait on each other.
+    /// What an outside WRITER of data() must wait on: every event of the read
+    /// list and of the container's own writes. Empty when nothing has read and
+    /// the container has not written. Outside writes never wait on each other.
     std::vector<sycl::event> write_deps() const {
-        std::vector<sycl::event> deps = collapsed(reads_);
-        const std::vector<sycl::event> own = collapsed(own_writes_);
-        deps.insert(deps.end(), own.begin(), own.end());
+        std::vector<sycl::event> deps = reads_;
+        deps.insert(deps.end(), own_writes_.begin(), own_writes_.end());
         return deps;
     }
 
@@ -338,13 +331,14 @@ public:
         cap(writes_);
     }
 
-    /// A list longer than this is collapsed by the registration that made it so,
-    /// so a container that is registered on again and again but never accessed
-    /// (read every step, never written) does not grow without bound.
+    /// A list longer than this drops its completed events at the registration
+    /// that made it so, so a container that is registered on again and again but
+    /// never accessed (read every step, never written) does not grow without
+    /// bound while its work completes.
     static constexpr size_type max_listed_events = 64;
 
-    /// How many events each list currently holds (a diagnostic: the lists
-    /// collapse on access and at max_listed_events).
+    /// How many events each list currently holds (a diagnostic: completed
+    /// events are dropped at max_listed_events).
     size_type read_list_size() const { return reads_.size(); }
     size_type write_list_size() const { return writes_.size(); }
 
@@ -426,34 +420,22 @@ private:
                 "events"};
     }
 
-    /// One event that completes when every event of `deps` has: an empty
-    /// single_task on the container's queue, placed on the container's device
-    /// (the host kind has none and runs on the stream's default).
-    sycl::event join(const std::vector<sycl::event>& deps) const {
-        if (get_kind() == kind::host) return queue_().single_task(deps, detail::collapse_noop{});
-        return queue_().single_task(alloc_.get_device(), deps, detail::collapse_noop{});
+    static bool is_complete(const sycl::event& e) {
+        return e.get_info<sycl::info::event::command_execution_status>() ==
+               sycl::info::event_command_status::complete;
     }
 
-    /// Collapses a list that registration pushed past max_listed_events.
+    /// Past max_listed_events, drops the events that have completed: they order
+    /// nothing. Events still in flight stay.
     void cap(std::vector<sycl::event>& list) const {
-        if (list.size() > max_listed_events) collapsed(list);
-    }
-
-    /// The list, as events to depend on. A list holding more than one event is
-    /// first replaced by the one event that joins them.
-    std::vector<sycl::event> collapsed(std::vector<sycl::event>& list) const {
-        if (list.size() > 1) {
-            sycl::event joined = join(list);
-            list.assign(1, joined);
-        }
-        return list;
+        if (list.size() > max_listed_events) std::erase_if(list, is_complete);
     }
 
     /// Everything the container's own writes, its free and sync() come after:
-    /// both lists, collapsed, and the extra dependencies of this one call.
+    /// both lists and the extra dependencies of this one call.
     std::vector<sycl::event> all_events(std::span<const sycl::event> extra = {}) const {
-        std::vector<sycl::event> all = collapsed(writes_);
-        const std::vector<sycl::event> r = collapsed(reads_);
+        std::vector<sycl::event> all = writes_;
+        const std::vector<sycl::event>& r = reads_;
         all.reserve(all.size() + r.size() + extra.size());
         all.insert(all.end(), r.begin(), r.end());
         all.insert(all.end(), extra.begin(), extra.end());
@@ -468,12 +450,9 @@ private:
         return e;
     }
 
-    /// The newest write as one event, for calls that submit nothing; a default
-    /// (completed) event when nothing has written.
-    sycl::event last_write() const {
-        const std::vector<sycl::event> w = collapsed(writes_);
-        return w.empty() ? sycl::event{} : w.back();
-    }
+    /// The newest write, for calls that submit nothing; a default (completed)
+    /// event when nothing has written.
+    sycl::event last_write() const { return writes_.empty() ? sycl::event{} : writes_.back(); }
 
     /// A copy out of `other`: it reads there and writes here. It comes after the
     /// source's write list and both of this container's lists, and is then a

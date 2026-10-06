@@ -93,6 +93,37 @@ private:
     int* flag_;
 };
 
+/// A kernel on the UNORDERED stream that spins until the host flips a flag, then writes 100 over `n` ints at `target`:
+/// a writer of a container's data whose event the container is handed. Declare it AFTER the UFixture and the
+/// containers it is registered on: it is destroyed first and opens itself.
+class WritingGate {
+public:
+    sycl::event event;
+
+    WritingGate(UFixture& u, int* target, std::size_t n) : flag_{u.host_int(0)} {
+        int* flag = flag_;
+        event     = u.uq.single_task(u.f.dev, [=] {
+            sycl::atomic_ref<int, sycl::memory_order::relaxed, sycl::memory_scope::system> a{*flag};
+            while (a.load() == 0) {
+            }
+            for (std::size_t i = 0; i < n; ++i) target[i] = 100;
+        });
+    }
+
+    WritingGate(const WritingGate&)            = delete;
+    WritingGate& operator=(const WritingGate&) = delete;
+
+    void open() { std::atomic_ref<int>{*flag_}.store(1); }
+
+    ~WritingGate() {
+        open();
+        event.wait();
+    }
+
+private:
+    int* flag_;
+};
+
 bool is_done(const sycl::event& e) {
     return e.get_info<sycl::info::event::command_execution_status>() ==
            sycl::info::event_command_status::complete;
@@ -288,16 +319,13 @@ TEST_CASE("usm_vector::read_deps includes registered writes, and a task dependin
     warm_up(u);
     int*            out = u.host_int(0);
     usm_vector<int> v{8, 1, device_alloc(u.f)};  // before the gate: the gate is destroyed first
-    // Two events in the write list: the sync collapses them, which loads the
-    // collapse kernel before the gate spins (same reason as warm_up).
-    v.register_write(v.read_deps());
     v.sync();
     Gate g{u, /*on_stream=*/false};
 
     REQUIRE(v.read_deps().size() == 1);  // the container's own fill
     v.register_write(g.event);
     const std::vector<sycl::event> evs = v.read_deps();
-    REQUIRE(evs.size() == 1);  // the fill and the registered write, collapsed into one
+    REQUIRE(evs.size() == 2);  // the fill and the registered write
 
     sycl::event e = u.uq.single_task(evs, SetTo{out, 1});
 
@@ -308,4 +336,47 @@ TEST_CASE("usm_vector::read_deps includes registered writes, and a task dependin
     g.open();
     REQUIRE(wait_done(e));
     CHECK(*out == 1);
+}
+
+/// *to = *from, a named type so the test launches the same kernel every time.
+struct CopyFirst {
+    const int* from;
+    int*       to;
+    void       operator()() const { *to = *from; }
+};
+
+TEST_CASE("a task on the unordered stream that depends on a container's write list waits for a writer on that stream",
+          "[unordered_queue][usm_vector][events]") {
+    // The reproduction of the cospan histogram flake, as far as a standalone test goes: the writer (a kernel on the
+    // UNORDERED stream, like cospan's launches) is registered on the container, and a reader that depends on the
+    // container's write list must not run before the writer and must see its write.
+    UFixture u;
+    warm_up(u);
+    int* scratch = u.host_int(0);
+    int* out     = u.host_int(0);
+    {  // the writing gate's kernel and the reader, launched once with nothing held back (the same reason as warm_up)
+        WritingGate warm{u, scratch, 1};
+        warm.open();
+        warm.event.wait();
+        u.uq.single_task(CopyFirst{scratch, out}).wait();
+    }
+    *out = 0;
+    usm_vector<int> v{8, 1, device_alloc(u.f)};  // before the gate: the gate is destroyed first
+    v.sync();
+
+    WritingGate g{u, v.data(), 8};
+    v.register_write(g.event);
+    const std::vector<sycl::event> deps = v.read_deps();
+    REQUIRE(deps.size() == 2);  // the container's own fill and the gate's kernel
+    sycl::event e = u.uq.single_task(deps, CopyFirst{v.data(), out});
+
+    settle();
+    CHECK_FALSE(is_done(g.event));
+    CHECK_FALSE(is_done(e));  // the reader comes after the spinning writer
+
+    g.open();
+    REQUIRE(wait_done(e));
+    CHECK(is_done(g.event));
+    CHECK(*out == 100);  // and saw its write
+    for (int x : v.host_view()) REQUIRE(x == 100);
 }
