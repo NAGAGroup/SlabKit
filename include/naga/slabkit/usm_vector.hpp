@@ -11,20 +11,24 @@
 // THE CONTAINER KEEPS TWO EVENT LISTS, and they are the only event truth:
 //
 //   * the WRITE list: the events of everything that wrote the data -- the
-//     container's own fills, copies-in and resizes, and outside writers handed
-//     over with register_write();
+//     container's own fills, copies-in and reallocation copies, and outside
+//     writers handed over with register_write();
 //   * the READ list: the events of everything that read the data -- copies out
 //     of the container, and outside readers handed over with register_read().
 //
 // WHAT AN OUTSIDE TASK WAITS ON
 //
 //   read_deps()   what an outside READER must wait on: the write list.
-//   write_deps()  what an outside WRITER must wait on: the read list and the
-//                 container's OWN writes (resize and reallocation fills and
-//                 copies, fill, from_host, copy-in). Outside writes never wait
-//                 on each other, but they do come after the container's own: a
-//                 fresh allocation's zero-fill landing after an outside
-//                 writer's kernel would clobber the kernel's result.
+//   write_deps()  what an outside WRITER must wait on: the read list. Outside
+//                 writes never wait on each other.
+//
+// ALLOCATIONS ARE UNINITIALIZED. resize(n) and reserve(n) never fill; a
+// constructor given only a size does not fill. A call or constructor given an
+// explicit value fills with it. A reallocation that has elements to keep copies
+// them over (the copy is an ordinary write, in the write list) and resize() /
+// reserve() return its event; when nothing was copied they return an empty
+// optional. Whoever reads the new storage waits on that event (CoSpan keeps it
+// in the variable's resize-event slot).
 //
 // Work the CALLER launches over data() is theirs to order by passing one of
 // these to it, and to hand back with register_read / register_write so the
@@ -46,12 +50,14 @@
 // submitted to join them: with a join task (an empty single_task over the list,
 // or one that increments a counter) CoSpan's tests saw dependent work read stale
 // data about half the time on the OpenMP backend of AdaptiveCpp, and without it
-// never. A standalone test of the join against a spinning kernel on an unordered
-// stream did NOT reproduce it, so the cause is not established. A registration
-// that makes a list longer than 64
-// events drops the events that have COMPLETED (they order nothing); events still
-// in flight stay however many there are. A free, which has waited on everything,
-// empties the lists.
+// never. The cause is not established.
+//
+// PRUNING happens at assignment only: a registration (register_read,
+// register_write, or the container's own) that makes a list longer than 8
+// events drops the events whose command_execution_status is complete (they
+// order nothing); events still in flight stay however many there are. Reading a
+// list never changes it. A free, which has waited on everything, empties the
+// lists.
 //
 // Two properties make this safe to use with work still in flight:
 //
@@ -65,7 +71,7 @@
 //
 // RESIZE IS std::vector's CONTRACT VERBATIM: the address changes immediately --
 // the allocation and the swap are host-side -- and the contents catch up, as an
-// enqueued copy and fill. Using the container concurrently with a resize is
+// enqueued copy (and a fill, when a value was given). Using the container concurrently with a resize is
 // undefined, and scope exit is ordinary scope semantics.
 //
 // It is NOT a std::vector: no operator[] on the container, no iterators, no
@@ -75,6 +81,7 @@
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -149,11 +156,11 @@ public:
     explicit usm_vector(allocator_type alloc)
         : alloc_{std::move(alloc)}, stream_{alloc_.get_queue()} {}
 
+    /// UNINITIALIZED: n elements of whatever the allocation holds.
     usm_vector(size_type n, allocator_type alloc)
         : alloc_{std::move(alloc)}, stream_{alloc_.get_queue()} {
         grow_to(n);
         size_ = n;
-        if (n > 0) record_write(queue_().fill(all_events(), data_, T{}, n));
     }
 
     usm_vector(size_type n, const T& value, allocator_type alloc)
@@ -214,14 +221,12 @@ public:
         , size_{other.size_}
         , capacity_{other.capacity_}
         , reads_{std::move(other.reads_)}
-        , writes_{std::move(other.writes_)}
-        , own_writes_{std::move(other.own_writes_)} {
+        , writes_{std::move(other.writes_)} {
         other.data_     = nullptr;
         other.size_     = 0;
         other.capacity_ = 0;
         other.reads_.clear();
         other.writes_.clear();
-        other.own_writes_.clear();
     }
 
     /// Storage is stolen only between EQUAL allocators; anything else would
@@ -239,13 +244,11 @@ public:
         capacity_       = other.capacity_;
         reads_          = std::move(other.reads_);
         writes_         = std::move(other.writes_);
-        own_writes_     = std::move(other.own_writes_);
         other.data_     = nullptr;
         other.size_     = 0;
         other.capacity_ = 0;
         other.reads_.clear();
         other.writes_.clear();
-        other.own_writes_.clear();
         return *this;
     }
 
@@ -255,7 +258,14 @@ public:
     // Mutations — each one task, each returning its event
     // -------------------------------------------------------------------------
 
-    sycl::event resize(size_type n) { return resize(n, std::span<const sycl::event>{}); }
+    /// Size change without initialization. Returns the event of the copy of the
+    /// old elements when the storage was reallocated with elements to keep;
+    /// otherwise an empty optional (shrinking, growing within capacity, growing
+    /// from empty).
+    std::optional<sycl::event> resize(size_type n) {
+        return resize(n, std::span<const sycl::event>{});
+    }
+    /// Resizes and fills the NEW elements with `value`.
     sycl::event resize(size_type n, const T& value) {
         return resize(n, value, std::span<const sycl::event>{});
     }
@@ -270,11 +280,17 @@ public:
     // fill of an empty container, a resize that does not grow) the returned
     // event is the container's last write and does not cover `deps`.
 
-    sycl::event resize(size_type n, std::span<const sycl::event> deps) {
-        return resize_impl(n, T{}, /*value_init=*/true, deps);
+    std::optional<sycl::event> resize(size_type n, std::span<const sycl::event> deps) {
+        if (n > capacity_) {
+            std::optional<sycl::event> e = reallocate(n, size_, deps);
+            size_                        = n;
+            return e;
+        }
+        size_ = n;
+        return std::nullopt;
     }
     sycl::event resize(size_type n, const T& value, std::span<const sycl::event> deps) {
-        return resize_impl(n, value, /*value_init=*/false, deps);
+        return resize_fill(n, value, deps);
     }
 
     sycl::event fill(const T& value, std::span<const sycl::event> deps) {
@@ -301,55 +317,43 @@ public:
     std::vector<sycl::event> read_deps() const { return writes_; }
 
     /// What an outside WRITER of data() must wait on: every event of the read
-    /// list and of the container's own writes. Empty when nothing has read and
-    /// the container has not written. Outside writes never wait on each other.
-    std::vector<sycl::event> write_deps() const {
-        std::vector<sycl::event> deps = reads_;
-        deps.insert(deps.end(), own_writes_.begin(), own_writes_.end());
-        return deps;
-    }
+    /// list. Empty when nothing has read. Outside writes never wait on each other.
+    std::vector<sycl::event> write_deps() const { return reads_; }
 
     /// Hands the container the event of outside work that reads data(). Later
     /// writes to the container come after it.
-    void register_read(const sycl::event& e) {
-        reads_.push_back(e);
-        cap(reads_);
-    }
+    void register_read(const sycl::event& e) { push(reads_, e); }
     void register_read(std::span<const sycl::event> evs) {
         reads_.insert(reads_.end(), evs.begin(), evs.end());
-        cap(reads_);
+        prune(reads_);
     }
 
     /// Hands the container the event of outside work that writes data(). Later
     /// reads of, and writes to, the container come after it.
-    void register_write(const sycl::event& e) {
-        writes_.push_back(e);
-        cap(writes_);
-    }
+    void register_write(const sycl::event& e) { push(writes_, e); }
     void register_write(std::span<const sycl::event> evs) {
         writes_.insert(writes_.end(), evs.begin(), evs.end());
-        cap(writes_);
+        prune(writes_);
     }
 
-    /// A list longer than this drops its completed events at the registration
-    /// that made it so, so a container that is registered on again and again but
-    /// never accessed (read every step, never written) does not grow without
-    /// bound while its work completes.
-    static constexpr size_type max_listed_events = 64;
+    /// A list that grows past this drops its completed events, at the
+    /// assignment that made it so (never at a read).
+    static constexpr size_type max_listed_events = 8;
 
-    /// How many events each list currently holds (a diagnostic: completed
-    /// events are dropped at max_listed_events).
+    /// How many events each list currently holds (a diagnostic).
     size_type read_list_size() const { return reads_.size(); }
     size_type write_list_size() const { return writes_.size(); }
 
-    void reserve(size_type n) {
-        if (n <= capacity_) return;
-        reallocate(n, size_);
+    /// Capacity only; the size stays. The event of the copy of the old elements
+    /// when there were any, else empty.
+    std::optional<sycl::event> reserve(size_type n) {
+        if (n <= capacity_) return std::nullopt;
+        return reallocate(n, size_);
     }
 
-    void shrink_to_fit() {
-        if (capacity_ == size_) return;
-        reallocate(size_, size_);
+    std::optional<sycl::event> shrink_to_fit() {
+        if (capacity_ == size_) return std::nullopt;
+        return reallocate(size_, size_);
     }
 
     /// Elements are trivially destructible, so this is a size change and
@@ -426,9 +430,14 @@ private:
     }
 
     /// Past max_listed_events, drops the events that have completed: they order
-    /// nothing. Events still in flight stay.
-    void cap(std::vector<sycl::event>& list) const {
+    /// nothing. Events still in flight stay. Called after an assignment only.
+    static void prune(std::vector<sycl::event>& list) {
         if (list.size() > max_listed_events) std::erase_if(list, is_complete);
+    }
+
+    static void push(std::vector<sycl::event>& list, const sycl::event& e) {
+        list.push_back(e);
+        prune(list);
     }
 
     /// Everything the container's own writes, its free and sync() come after:
@@ -444,9 +453,7 @@ private:
 
     /// The container's own write, recorded in the write list.
     sycl::event record_write(sycl::event e) {
-        writes_.push_back(e);
-        own_writes_.push_back(e);
-        cap(own_writes_);
+        push(writes_, e);
         return e;
     }
 
@@ -462,7 +469,7 @@ private:
         const std::vector<sycl::event> src = other.read_deps();
         deps.insert(deps.end(), src.begin(), src.end());
         sycl::event e = queue_().copy(deps, other.data_, data_, size_);
-        other.reads_.push_back(e);
+        push(other.reads_, e);
         return record_write(e);
     }
 
@@ -484,7 +491,6 @@ private:
         else sycl::event::wait(all);
         reads_.clear();
         writes_.clear();
-        own_writes_.clear();
     }
 
     void release_storage() {
@@ -495,18 +501,26 @@ private:
     }
 
     /// New storage of `n` elements carrying the first `keep` of the old, whose
-    /// release waits for both lists, the copy that read it among them.
-    void reallocate(size_type n, size_type keep, std::span<const sycl::event> deps = {}) {
+    /// release waits for both lists, the copy that read it among them. Returns the
+    /// copy's event, empty when nothing was copied. The size becomes `keep`.
+    std::optional<sycl::event> reallocate(size_type n, size_type keep,
+                                          std::span<const sycl::event> deps = {}) {
         T* const        old      = data_;
         const size_type old_size = capacity_;
         data_                    = nullptr;
         capacity_                = 0;
         grow_to(n);
 
+        std::optional<sycl::event> copy;
         if (keep > 0 && old != nullptr)
-            record_write(queue_().copy(all_events(deps), old, data_, keep));
+            copy = record_write(queue_().copy(all_events(deps), old, data_, keep));
         if (old != nullptr) retire(old, old_size);
+        // retire() waited on everything and emptied the lists, the copy among
+        // it. The copy wrote the new storage, so it goes back into the write
+        // list (complete by now, but the list is the record of what wrote).
+        if (copy) push(writes_, *copy);
         size_ = keep;
+        return copy;
     }
 
     sycl::event from_host_copy(std::span<const T> src, std::span<const sycl::event> deps = {}) {
@@ -519,14 +533,12 @@ private:
         return record_write(e);
     }
 
-    sycl::event resize_impl(size_type n, const T& value, bool value_init,
-                            std::span<const sycl::event> deps) {
+    sycl::event resize_fill(size_type n, const T& value, std::span<const sycl::event> deps) {
         if (n > capacity_) reallocate(n, size_ < n ? size_ : n, deps);
 
         if (n > size_) {
-            const T     pattern = value_init ? T{} : value;
             sycl::event e =
-                record_write(queue_().fill(all_events(deps), data_ + size_, pattern, n - size_));
+                record_write(queue_().fill(all_events(deps), data_ + size_, value, n - size_));
             size_ = n;
             return e;
         }
@@ -544,9 +556,6 @@ private:
     // list collapses it, and a copy out of a const source is a read of it.
     mutable std::vector<sycl::event> reads_{};
     mutable std::vector<sycl::event> writes_{};
-    // The container's own writes (a subset of writes_): what an outside writer
-    // waits on besides the read list.
-    mutable std::vector<sycl::event> own_writes_{};
 };
 
 }  // namespace naga::slabkit

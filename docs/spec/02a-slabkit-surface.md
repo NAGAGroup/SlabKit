@@ -516,7 +516,7 @@ public:
     using value_type = T;  using allocator_type = allocator<T>;  using size_type = std::size_t;
 
     explicit usm_vector(allocator_type alloc);
-    usm_vector(size_type n, allocator_type alloc);                       // value-initialized, enqueued
+    usm_vector(size_type n, allocator_type alloc);                       // UNINITIALIZED, nothing enqueued
     usm_vector(size_type n, const T& value, allocator_type alloc);       // fill, enqueued
     usm_vector(std::span<const T> src, allocator_type alloc);            // H2D from a copy of src, enqueued
     usm_vector(std::initializer_list<T> src, allocator_type alloc);
@@ -527,14 +527,14 @@ public:
     usm_vector(usm_vector&&) noexcept;
     usm_vector& operator=(usm_vector&&) noexcept;                        // steals storage between equal allocators only
 
-    sycl::event resize(size_type n);
-    sycl::event resize(size_type n, const T& value);
+    std::optional<sycl::event> resize(size_type n);                      // never fills; the copy's event when the storage was reallocated with elements to keep
+    sycl::event resize(size_type n, const T& value);                     // fills the new elements
     sycl::event fill(const T& value);
     sycl::event from_host(std::span<const T> src);
-    void reserve(size_type n);  void shrink_to_fit();  void clear();
+    std::optional<sycl::event> reserve(size_type n);  std::optional<sycl::event> shrink_to_fit();  void clear();
     size_type size() const;  size_type capacity() const;  bool empty() const;
     std::vector<sycl::event> read_deps() const;                          // what an outside reader waits on: every event of the write list
-    std::vector<sycl::event> write_deps() const;                         // what an outside writer waits on: every event of the read list and of the container's own writes
+    std::vector<sycl::event> write_deps() const;                         // what an outside writer waits on: every event of the read list
     void register_read(const sycl::event&);   void register_read(std::span<const sycl::event>);
     void register_write(const sycl::event&);  void register_write(std::span<const sycl::event>);
 

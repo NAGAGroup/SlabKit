@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <thread>
@@ -128,7 +129,7 @@ void warm_up(Fixture& f) {
 
 }  // namespace
 
-TEST_CASE("construction fills, copies and value-initializes", "[usm_vector]") {
+TEST_CASE("construction fills with a value, copies, and leaves a bare size uninitialized", "[usm_vector]") {
     Fixture f;
 
     for (kind k : {kind::device, kind::shared, kind::host}) {
@@ -137,7 +138,11 @@ TEST_CASE("construction fills, copies and value-initializes", "[usm_vector]") {
         REQUIRE(empty.size() == 0);
         REQUIRE(empty.get_kind() == k);
 
-        usm_vector<int> zeros{6, alloc_of(f, k)};
+        // Size only: uninitialized, so only the size is defined.
+        usm_vector<int> bare{6, alloc_of(f, k)};
+        REQUIRE(bare.size() == 6);
+
+        usm_vector<int> zeros{6, 0, alloc_of(f, k)};
         REQUIRE(zeros.size() == 6);
         for (int v : zeros.host_view()) REQUIRE(v == 0);
 
@@ -478,11 +483,9 @@ TEST_CASE("outside writes do not wait on each other", "[usm_vector][events]") {
     v.register_write(g1.event);
     v.register_write(g2.event);
 
-    // A writer waits on the READ list (nothing has read) and on the container's own writes (the construction fill,
-    // already finished after the sync): never on the outside writes registered above.
+    // A writer waits on the READ list alone (nothing has read): never on the outside writes registered above.
     const std::vector<sycl::event> deps = v.write_deps();
-    REQUIRE(deps.size() == 1);
-    REQUIRE(is_done(deps.front()));
+    REQUIRE(deps.empty());
 
     sycl::event e            = f.q.single_task(deps, Poke{v.data(), 9});
     const bool  finished     = wait_done(e);
@@ -498,70 +501,83 @@ TEST_CASE("outside writes do not wait on each other", "[usm_vector][events]") {
     for (std::size_t i = 1; i < 8; ++i) REQUIRE(view[i] == 1);
 }
 
-TEST_CASE("an outside writer waits on the container's own writes", "[usm_vector][events]") {
+TEST_CASE("a size-only constructor does not fill, a value constructor does", "[usm_vector]") {
     Fixture f;
-    warm_up(f);
 
-    usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
-    v.reserve(64);  // room to grow in place: a reallocation frees, and the free waits
-    v.sync();
-    // The gate holds the container's own write back (a write waits on the write list), so the write is still in flight
-    // when the outside writer is ordered. Written 9 by the outside writer AFTER the own write: a writer that did not wait
-    // for it would be overwritten by it.
-    Gate g{f};
-    v.register_write(g.event);
+    usm_vector<int> bare{8, alloc_of(f, kind::device)};
+    REQUIRE(bare.size() == 8);
+    REQUIRE(bare.write_list_size() == 0);  // nothing was submitted
 
-    SECTION("a fill") {
-        sycl::event own = v.fill(5);
-        const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE_FALSE(deps.empty());
-        sycl::event e = f.q.single_task(deps, Poke{v.data(), 9});
-        settle();
-        REQUIRE_FALSE(is_done(own));
-        REQUIRE_FALSE(is_done(e));
+    usm_vector<int> filled{8, 3, alloc_of(f, kind::device)};
+    REQUIRE(filled.write_list_size() == 1);  // the fill
+    for (int x : filled.host_view()) REQUIRE(x == 3);
+}
 
-        g.open();
-        REQUIRE(wait_done(e));
-        v.register_write(e);
-        const auto view = v.host_view();
-        REQUIRE(view[0] == 9);
-        for (std::size_t i = 1; i < 8; ++i) REQUIRE(view[i] == 5);
+TEST_CASE("resize and reserve never initialize and return the copy's event, if any",
+          "[usm_vector][events]") {
+    Fixture f;
+    const auto has = [](const std::vector<sycl::event>& l, const sycl::event& e) {
+        return std::find(l.begin(), l.end(), e) != l.end();
+    };
+
+    SECTION("growing from empty: no event, nothing submitted") {
+        usm_vector<int> v{alloc_of(f, kind::device)};
+        const std::optional<sycl::event> e = v.resize(8);
+        REQUIRE_FALSE(e.has_value());
+        REQUIRE(v.size() == 8);
+        REQUIRE(v.capacity() >= 8);
+        REQUIRE(v.write_list_size() == 0);
     }
 
-    SECTION("a resize's value-initializing fill of new elements") {
-        sycl::event own = v.resize(16, 7);
-        const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE_FALSE(deps.empty());
-        sycl::event e = f.q.single_task(deps, Poke{v.data() + 8, 9});
-        settle();
-        REQUIRE_FALSE(is_done(own));
-        REQUIRE_FALSE(is_done(e));
-
-        g.open();
-        REQUIRE(wait_done(e));
-        v.register_write(e);
-        const auto view = v.host_view();
-        REQUIRE(view.size() == 16);
-        REQUIRE(view[8] == 9);
-        for (std::size_t i = 9; i < 16; ++i) REQUIRE(view[i] == 7);
+    SECTION("shrinking: no event, the head stays") {
+        usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+        const std::size_t cap = v.capacity();
+        REQUIRE_FALSE(v.resize(4).has_value());
+        REQUIRE(v.size() == 4);
+        REQUIRE(v.capacity() == cap);
+        for (int x : v.host_view()) REQUIRE(x == 1);
     }
 
-    SECTION("a from_host") {
-        const std::vector<int> src(8, 4);
-        sycl::event            own = v.from_host(std::span<const int>{src});
-        const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE_FALSE(deps.empty());
-        sycl::event e = f.q.single_task(deps, Poke{v.data(), 9});
-        settle();
-        REQUIRE_FALSE(is_done(own));
-        REQUIRE_FALSE(is_done(e));
-
-        g.open();
-        REQUIRE(wait_done(e));
-        v.register_write(e);
+    SECTION("growing within capacity: no event, the old elements stay") {
+        usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+        REQUIRE(v.reserve(64).has_value());
+        v.sync();
+        const std::size_t listed = v.write_list_size();
+        int* const        p      = v.data();
+        REQUIRE_FALSE(v.resize(16).has_value());
+        REQUIRE(v.size() == 16);
+        REQUIRE(v.data() == p);
+        REQUIRE(v.write_list_size() == listed);  // nothing submitted
         const auto view = v.host_view();
-        REQUIRE(view[0] == 9);
-        for (std::size_t i = 1; i < 8; ++i) REQUIRE(view[i] == 4);
+        for (std::size_t i = 0; i < 8; ++i) REQUIRE(view[i] == 1);
+    }
+
+    SECTION("reallocating with data: the copy's event, in the write list; the data survives") {
+        usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+        const std::optional<sycl::event> e = v.resize(64);
+        REQUIRE(e.has_value());
+        REQUIRE(v.size() == 64);
+        REQUIRE(has(v.read_deps(), *e));
+        sycl::event copy = *e;
+        copy.wait();
+        const auto view = v.host_view();
+        for (std::size_t i = 0; i < 8; ++i) REQUIRE(view[i] == 1);
+    }
+
+    SECTION("reserve: capacity only, with the same event") {
+        usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+        const std::optional<sycl::event> e = v.reserve(64);
+        REQUIRE(e.has_value());
+        REQUIRE(v.size() == 8);
+        REQUIRE(v.capacity() >= 64);
+        REQUIRE(has(v.read_deps(), *e));
+        for (int x : v.host_view()) REQUIRE(x == 1);
+
+        REQUIRE_FALSE(v.reserve(4).has_value());  // already enough
+        usm_vector<int> empty{alloc_of(f, kind::device)};
+        REQUIRE_FALSE(empty.reserve(64).has_value());  // nothing to copy
+        REQUIRE(empty.capacity() >= 64);
+        REQUIRE(empty.size() == 0);
     }
 }
 
@@ -643,9 +659,8 @@ TEST_CASE("assign orders against both containers", "[usm_vector][events]") {
         REQUIRE_FALSE(is_done(e));
 
         // The copy is the source's only read, so a writer of src waits on it...
-        // (and on src's own construction fill, listed after the read)
         const std::vector<sycl::event> wd = src.write_deps();
-        REQUIRE(wd.size() == 2);
+        REQUIRE(wd.size() == 1);
         CHECK(wd.front() == e);
         // ...and it is a write of dst, so a reader of dst waits on it too.
         const std::vector<sycl::event> rd = dst.read_deps();
@@ -723,13 +738,13 @@ TEST_CASE("an event list is handed out whole: every registered event is in it", 
         for (const sycl::event& e : deps) REQUIRE(wait_done(e));
     }
 
-    SECTION("the read list and the container's own writes, read through write_deps") {
+    SECTION("the read list, read through write_deps") {
         v.register_read(g1.event);
         v.register_read(g2.event);
         v.register_read(g3.event);
 
         const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE(deps.size() == 4);  // the three registered reads, then the container's own construction fill
+        REQUIRE(deps.size() == 3);  // the three registered reads
         CHECK(has(deps, g1.event));
         CHECK(has(deps, g2.event));
         CHECK(has(deps, g3.event));
@@ -848,8 +863,8 @@ TEST_CASE("a copy out to the host waits on the write list and registers a read",
         REQUIRE(seen.size() == 8);
         for (int x : seen) REQUIRE(x == 100);
 
-        // The copy is now a read: a writer of the container waits for it (and for its construction fill).
-        REQUIRE(v.write_deps().size() == 2);
+        // The copy is now a read: a writer of the container waits for it.
+        REQUIRE(v.write_deps().size() == 1);
     }
 
     SECTION("it does not wait on a registered read") {
@@ -897,7 +912,7 @@ TEST_CASE("the event lists travel with a move", "[usm_vector][events]") {
     REQUIRE(wait_done(e));
 }
 
-TEST_CASE("a registration that makes a list longer than 64 events drops the completed ones",
+TEST_CASE("a registration that makes a list longer than 8 events drops the completed ones",
           "[usm_vector][events]") {
     Fixture f;
     warm_up(f);
@@ -912,16 +927,32 @@ TEST_CASE("a registration that makes a list longer than 64 events drops the comp
         done.back().wait();
     }
     const std::size_t cap = usm_vector<int>::max_listed_events;
-    REQUIRE(cap == 64);
+    REQUIRE(cap == 8);
 
     SECTION("reads, one at a time") {
         REQUIRE(v.read_list_size() == 0);
         for (std::size_t i = 0; i < cap; ++i) v.register_read(done[i]);
         REQUIRE(v.read_list_size() == cap);  // at the cap: nothing dropped yet
         v.register_read(done[cap]);
-        REQUIRE(v.read_list_size() == 0);  // the 65th dropped them all: every one has completed
-        for (std::size_t i = cap + 1; i < done.size(); ++i) v.register_read(done[i]);
-        REQUIRE(v.read_list_size() == done.size() - cap - 1);
+        REQUIRE(v.read_list_size() == 0);  // the 9th dropped them all: every one has completed
+        v.register_read(done[cap + 1]);
+        REQUIRE(v.read_list_size() == 1);
+    }
+
+    SECTION("reading a list never prunes it") {
+        Gate g{f};
+        v.register_read(g.event);
+        for (std::size_t i = 0; i + 1 < cap; ++i) v.register_read(done[i]);
+        REQUIRE(v.read_list_size() == cap);
+        g.open();
+        REQUIRE(wait_done(g.event));  // now all eight have completed
+
+        (void)v.write_deps();
+        (void)v.read_deps();
+        REQUIRE(v.read_list_size() == cap);  // reads left it alone
+        REQUIRE(v.write_deps().size() == cap);
+        v.register_read(done[cap]);  // an assignment past the cap prunes
+        REQUIRE(v.read_list_size() == 0);
     }
 
     SECTION("writes, as one span") {
@@ -933,11 +964,11 @@ TEST_CASE("a registration that makes a list longer than 64 events drops the comp
     SECTION("an event still in flight is kept") {
         Gate g{f};
         v.register_read(g.event);
-        for (std::size_t i = 0; i < cap; ++i) v.register_read(done[i]);  // the 65th event
+        for (std::size_t i = 0; i < cap; ++i) v.register_read(done[i]);  // the 9th event
         REQUIRE(v.read_list_size() == 1);  // only the gate's
 
         const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE(deps.size() == 2);  // the gate's event, and the construction fill
+        REQUIRE(deps.size() == 1);  // the gate's event
         CHECK(deps.front() == g.event);
         settle();
         REQUIRE_FALSE(is_done(deps.front()));
@@ -969,17 +1000,35 @@ TEST_CASE("the extra-dependency overloads order after the given events",
         for (int x : v.host_view()) REQUIRE(x == 5);
     }
 
-    SECTION("resize(n, deps)") {
-        Gate g{f, v.data() + 8, 8};
-        sycl::event e = v.resize(16, g.as_deps());
-        settle();
-        REQUIRE_FALSE(is_done(e));
-
+    SECTION("resize(n, deps) within capacity submits nothing") {
+        Gate g{f};
+        REQUIRE_FALSE(v.resize(16, g.as_deps()).has_value());
+        REQUIRE(v.size() == 16);
         g.open();
-        REQUIRE(wait_done(e));
-        const auto view = v.host_view();
-        REQUIRE(view.size() == 16);
-        for (std::size_t i = 8; i < 16; ++i) REQUIRE(view[i] == 0);
+    }
+
+    SECTION("resize(n, deps) that reallocates: the copy comes after the deps") {
+        usm_vector<int> u{8, 1, alloc_of(f, kind::device)};
+        u.sync();
+        // The gate rewrites the OLD storage to 100 once opened; the copy comes after it.
+        Gate g{f, u.data(), 8};
+
+        // The reallocation frees the old storage synchronously, after the copy: the call returns once the gate opens.
+        std::atomic<bool>          returned{false};
+        std::optional<sycl::event> e;
+        std::thread                t{[&] {
+            e        = u.resize(64, g.as_deps());
+            returned = true;
+        }};
+        settle();
+        const bool returned_early = returned.load();
+        g.open();
+        t.join();
+
+        REQUIRE_FALSE(returned_early);
+        REQUIRE(e.has_value());
+        const auto view = u.host_view();
+        for (std::size_t i = 0; i < 8; ++i) REQUIRE(view[i] == 100);
     }
 
     SECTION("resize(n, value, deps)") {
