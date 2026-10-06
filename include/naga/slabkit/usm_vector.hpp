@@ -19,8 +19,12 @@
 // WHAT AN OUTSIDE TASK WAITS ON
 //
 //   read_deps()   what an outside READER must wait on: the write list.
-//   write_deps()  what an outside WRITER must wait on: the read list. Writes
-//                 never wait on writes.
+//   write_deps()  what an outside WRITER must wait on: the read list and the
+//                 container's OWN writes (resize and reallocation fills and
+//                 copies, fill, from_host, copy-in). Outside writes never wait
+//                 on each other, but they do come after the container's own: a
+//                 fresh allocation's zero-fill landing after an outside
+//                 writer's kernel would clobber the kernel's result.
 //
 // Work the CALLER launches over data() is theirs to order by passing one of
 // these to it, and to hand back with register_read / register_write so the
@@ -215,12 +219,14 @@ public:
         , size_{other.size_}
         , capacity_{other.capacity_}
         , reads_{std::move(other.reads_)}
-        , writes_{std::move(other.writes_)} {
+        , writes_{std::move(other.writes_)}
+        , own_writes_{std::move(other.own_writes_)} {
         other.data_     = nullptr;
         other.size_     = 0;
         other.capacity_ = 0;
         other.reads_.clear();
         other.writes_.clear();
+        other.own_writes_.clear();
     }
 
     /// Storage is stolen only between EQUAL allocators; anything else would
@@ -238,11 +244,13 @@ public:
         capacity_       = other.capacity_;
         reads_          = std::move(other.reads_);
         writes_         = std::move(other.writes_);
+        own_writes_     = std::move(other.own_writes_);
         other.data_     = nullptr;
         other.size_     = 0;
         other.capacity_ = 0;
         other.reads_.clear();
         other.writes_.clear();
+        other.own_writes_.clear();
         return *this;
     }
 
@@ -297,10 +305,16 @@ public:
     /// to one event if it held several. Empty when nothing has written.
     std::vector<sycl::event> read_deps() const { return collapsed(writes_); }
 
-    /// What an outside WRITER of data() must wait on: the read list, collapsed
-    /// to one event if it held several. Empty when nothing has read. Writes
-    /// never wait on writes.
-    std::vector<sycl::event> write_deps() const { return collapsed(reads_); }
+    /// What an outside WRITER of data() must wait on: the read list and the
+    /// container's own writes, each collapsed to one event if it held several.
+    /// Empty when nothing has read and the container has not written. Outside
+    /// writes never wait on each other.
+    std::vector<sycl::event> write_deps() const {
+        std::vector<sycl::event> deps = collapsed(reads_);
+        const std::vector<sycl::event> own = collapsed(own_writes_);
+        deps.insert(deps.end(), own.begin(), own.end());
+        return deps;
+    }
 
     /// Hands the container the event of outside work that reads data(). Later
     /// writes to the container come after it.
@@ -449,6 +463,8 @@ private:
     /// The container's own write, recorded in the write list.
     sycl::event record_write(sycl::event e) {
         writes_.push_back(e);
+        own_writes_.push_back(e);
+        cap(own_writes_);
         return e;
     }
 
@@ -489,6 +505,7 @@ private:
         else sycl::event::wait(all);
         reads_.clear();
         writes_.clear();
+        own_writes_.clear();
     }
 
     void release_storage() {
@@ -548,6 +565,9 @@ private:
     // list collapses it, and a copy out of a const source is a read of it.
     mutable std::vector<sycl::event> reads_{};
     mutable std::vector<sycl::event> writes_{};
+    // The container's own writes (a subset of writes_): what an outside writer
+    // waits on besides the read list.
+    mutable std::vector<sycl::event> own_writes_{};
 };
 
 }  // namespace naga::slabkit

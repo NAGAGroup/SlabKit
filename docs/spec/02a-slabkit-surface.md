@@ -534,7 +534,7 @@ public:
     void reserve(size_type n);  void shrink_to_fit();  void clear();
     size_type size() const;  size_type capacity() const;  bool empty() const;
     std::vector<sycl::event> read_deps() const;                          // what an outside reader waits on: the write list, collapsed
-    std::vector<sycl::event> write_deps() const;                         // what an outside writer waits on: the read list, collapsed
+    std::vector<sycl::event> write_deps() const;                         // what an outside writer waits on: the read list and the container's own writes, each collapsed
     void register_read(const sycl::event&);   void register_read(std::span<const sycl::event>);
     void register_write(const sycl::event&);  void register_write(std::span<const sycl::event>);
 

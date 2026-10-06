@@ -477,9 +477,11 @@ TEST_CASE("outside writes do not wait on each other", "[usm_vector][events]") {
     v.register_write(g1.event);
     v.register_write(g2.event);
 
-    // A writer waits on the READ list, and nothing has read.
+    // A writer waits on the READ list (nothing has read) and on the container's own writes (the construction fill,
+    // already finished after the sync): never on the outside writes registered above.
     const std::vector<sycl::event> deps = v.write_deps();
-    REQUIRE(deps.empty());
+    REQUIRE(deps.size() == 1);
+    REQUIRE(is_done(deps.front()));
 
     sycl::event e            = f.q.single_task(deps, Poke{v.data(), 9});
     const bool  finished     = wait_done(e);
@@ -493,6 +495,73 @@ TEST_CASE("outside writes do not wait on each other", "[usm_vector][events]") {
     const auto view = v.host_view();
     REQUIRE(view[0] == 9);
     for (std::size_t i = 1; i < 8; ++i) REQUIRE(view[i] == 1);
+}
+
+TEST_CASE("an outside writer waits on the container's own writes", "[usm_vector][events]") {
+    Fixture f;
+    warm_up(f);
+
+    usm_vector<int> v{8, 1, alloc_of(f, kind::device)};
+    v.reserve(64);  // room to grow in place: a reallocation frees, and the free waits
+    v.sync();
+    // The gate holds the container's own write back (a write waits on the write list), so the write is still in flight
+    // when the outside writer is ordered. Written 9 by the outside writer AFTER the own write: a writer that did not wait
+    // for it would be overwritten by it.
+    Gate g{f};
+    v.register_write(g.event);
+
+    SECTION("a fill") {
+        sycl::event own = v.fill(5);
+        const std::vector<sycl::event> deps = v.write_deps();
+        REQUIRE_FALSE(deps.empty());
+        sycl::event e = f.q.single_task(deps, Poke{v.data(), 9});
+        settle();
+        REQUIRE_FALSE(is_done(own));
+        REQUIRE_FALSE(is_done(e));
+
+        g.open();
+        REQUIRE(wait_done(e));
+        v.register_write(e);
+        const auto view = v.host_view();
+        REQUIRE(view[0] == 9);
+        for (std::size_t i = 1; i < 8; ++i) REQUIRE(view[i] == 5);
+    }
+
+    SECTION("a resize's value-initializing fill of new elements") {
+        sycl::event own = v.resize(16, 7);
+        const std::vector<sycl::event> deps = v.write_deps();
+        REQUIRE_FALSE(deps.empty());
+        sycl::event e = f.q.single_task(deps, Poke{v.data() + 8, 9});
+        settle();
+        REQUIRE_FALSE(is_done(own));
+        REQUIRE_FALSE(is_done(e));
+
+        g.open();
+        REQUIRE(wait_done(e));
+        v.register_write(e);
+        const auto view = v.host_view();
+        REQUIRE(view.size() == 16);
+        REQUIRE(view[8] == 9);
+        for (std::size_t i = 9; i < 16; ++i) REQUIRE(view[i] == 7);
+    }
+
+    SECTION("a from_host") {
+        const std::vector<int> src(8, 4);
+        sycl::event            own = v.from_host(std::span<const int>{src});
+        const std::vector<sycl::event> deps = v.write_deps();
+        REQUIRE_FALSE(deps.empty());
+        sycl::event e = f.q.single_task(deps, Poke{v.data(), 9});
+        settle();
+        REQUIRE_FALSE(is_done(own));
+        REQUIRE_FALSE(is_done(e));
+
+        g.open();
+        REQUIRE(wait_done(e));
+        v.register_write(e);
+        const auto view = v.host_view();
+        REQUIRE(view[0] == 9);
+        for (std::size_t i = 1; i < 8; ++i) REQUIRE(view[i] == 4);
+    }
 }
 
 TEST_CASE("a registered write delays a later fill, resize or copy-assign",
@@ -573,8 +642,9 @@ TEST_CASE("assign orders against both containers", "[usm_vector][events]") {
         REQUIRE_FALSE(is_done(e));
 
         // The copy is the source's only read, so a writer of src waits on it...
+        // (and on src's own construction fill, listed after the read)
         const std::vector<sycl::event> wd = src.write_deps();
-        REQUIRE(wd.size() == 1);
+        REQUIRE(wd.size() == 2);
         CHECK(wd.front() == e);
         // ...and it is a write of dst, so a reader of dst waits on it too.
         const std::vector<sycl::event> rd = dst.read_deps();
@@ -653,8 +723,9 @@ TEST_CASE("a collapsed event covers every event it replaced", "[usm_vector][even
         v.register_read(g2.event);
         v.register_read(g3.event);
 
+        // The joined read list, then the container's own construction fill.
         const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE(deps.size() == 1);
+        REQUIRE(deps.size() == 2);
         const sycl::event joined = deps.front();
         REQUIRE(v.write_deps().front() == joined);
 
@@ -772,8 +843,8 @@ TEST_CASE("a copy out to the host waits on the write list and registers a read",
         REQUIRE(seen.size() == 8);
         for (int x : seen) REQUIRE(x == 100);
 
-        // The copy is now a read: a writer of the container waits for it.
-        REQUIRE(v.write_deps().size() == 1);
+        // The copy is now a read: a writer of the container waits for it (and for its construction fill).
+        REQUIRE(v.write_deps().size() == 2);
     }
 
     SECTION("it does not wait on a registered read") {
@@ -861,7 +932,7 @@ TEST_CASE("a list is collapsed by the registration that makes it longer than 64 
         REQUIRE(v.read_list_size() == 1);
 
         const std::vector<sycl::event> deps = v.write_deps();
-        REQUIRE(deps.size() == 1);
+        REQUIRE(deps.size() == 2);  // the collapsed read list, and the construction fill
         settle();
         REQUIRE_FALSE(is_done(deps.front()));
         g.open();
