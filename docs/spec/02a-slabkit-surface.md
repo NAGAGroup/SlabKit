@@ -533,7 +533,10 @@ public:
     sycl::event from_host(std::span<const T> src);
     void reserve(size_type n);  void shrink_to_fit();  void clear();
     size_type size() const;  size_type capacity() const;  bool empty() const;
-    sycl::event last_event() const;                                      // the event of the most recent mutation
+    std::vector<sycl::event> read_deps() const;                          // what an outside reader waits on: the write list, collapsed
+    std::vector<sycl::event> write_deps() const;                         // what an outside writer waits on: the read list, collapsed
+    void register_read(const sycl::event&);   void register_read(std::span<const sycl::event>);
+    void register_write(const sycl::event&);  void register_write(std::span<const sycl::event>);
 
     T*       data();       const T* data() const;                        // valid until the next reallocation
     host_access<T> get_access();                                         // syncs; mutable view; shared/host kinds only

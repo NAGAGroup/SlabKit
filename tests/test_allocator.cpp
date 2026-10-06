@@ -166,7 +166,7 @@ TEST_CASE("an OS-route free on the calling thread, with other kernels in flight,
             usm_vector<float> scratch{big, allocator<float>{f.q, kind::device, f.dev}};
             float*            tmp = scratch.data();
             sycl::event       k   = f.q.parallel_for(
-                std::vector<sycl::event>{scratch.last_event()}, sycl::range<1>{big},
+                scratch.read_deps(), sycl::range<1>{big},
                 [=](sycl::id<1> j) { tmp[j[0]] = static_cast<float>(j[0]); });
             k.wait();  // the caller waits for what they did
         }  // the OS-route free happens here, on this thread

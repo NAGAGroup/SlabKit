@@ -9,8 +9,8 @@
 //   2. a task given NO events is not held back by anything else on the stream,
 //   3. wait() covers everything submitted, and a host task's exception surfaces
 //      from wait_and_throw,
-//   4. usm_vector::events() is what a task on this stream passes to come after a
-//      container's work and its registered events.
+//   4. usm_vector::read_deps() is what a task on this stream passes to come after a
+//      container's writes, including the outside writes registered on it.
 //
 // A held-back dependency is a Gate: a kernel that spins on a flag in host USM
 // until the test opens it. Every wait in a test that could hang if the property
@@ -282,19 +282,22 @@ TEST_CASE("a queue reports its context and its default device, and compares by s
     REQUIRE(a != b);
 }
 
-TEST_CASE("usm_vector::events includes registered events, and a task depending on it waits",
+TEST_CASE("usm_vector::read_deps includes registered writes, and a task depending on it waits",
           "[unordered_queue][usm_vector]") {
     UFixture        u;
     warm_up(u);
     int*            out = u.host_int(0);
     usm_vector<int> v{8, 1, device_alloc(u.f)};  // before the gate: the gate is destroyed first
+    // Two events in the write list: the sync collapses them, which loads the
+    // collapse kernel before the gate spins (same reason as warm_up).
+    v.register_write(v.read_deps());
     v.sync();
     Gate g{u, /*on_stream=*/false};
 
-    REQUIRE(v.events().size() == 1);  // the container's own last event
-    v.register_event(g.event);
-    const std::vector<sycl::event> evs = v.events();
-    REQUIRE(evs.size() == 2);  // last event + the registered one
+    REQUIRE(v.read_deps().size() == 1);  // the container's own fill
+    v.register_write(g.event);
+    const std::vector<sycl::event> evs = v.read_deps();
+    REQUIRE(evs.size() == 1);  // the fill and the registered write, collapsed into one
 
     sycl::event e = u.uq.single_task(evs, SetTo{out, 1});
 
