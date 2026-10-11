@@ -63,6 +63,25 @@ TEST_CASE("a queue reports its context and its default device", "[queue]") {
     REQUIRE(copy.get_device() == s.q.get_device());
 }
 
+TEST_CASE("a queue over a multi-device context defaults to SYCL's default device, not the context's first", "[queue]") {
+    const context      all{};  // every root device, in platform order
+    const sycl::device dflt{sycl::default_selector_v};
+    queue              q{all};
+    REQUIRE(q.get_device() == dflt);
+    if (all.devices().size() > 1 && all.devices().front() != dflt)
+        REQUIRE(q.get_device() != all.devices().front());  // this machine tells the two apart
+
+    // An explicit default device still wins, and a context without SYCL's default device is refused.
+    queue named{all, all.devices().back()};
+    REQUIRE(named.get_device() == all.devices().back());
+    sycl::device other;
+    if (slabkit_test::second_device(dflt, other)) {
+        const context without{other};
+        REQUIRE_THROWS_AS((queue{without}), std::invalid_argument);
+        REQUIRE(queue{without, other}.get_device() == other);
+    }
+}
+
 TEST_CASE("a device outside the context cannot be placed on", "[queue]") {
     Stream       s;
     sycl::device other;

@@ -39,12 +39,15 @@ sycl::queue make_lane(const sycl::async_handler& handler, const sycl::property_l
 
 UnorderedState::UnorderedState(context c, const sycl::device* dev, sycl::async_handler handler)
     : ctx{std::move(c)}
-    , default_device{dev ? *dev : ctx.devices().front()}
+    // SYCL's default device (the one a default-constructed sycl::queue picks), never the context's first device.
+    , default_device{dev ? *dev : sycl::device{sycl::default_selector_v}}
     , stream{make_lane(handler, kUnorderedProps)}
     , errors{std::make_shared<HostErrors>()} {
-    if (dev && !ctx.contains(*dev))
+    if (!ctx.contains(default_device))
         throw std::invalid_argument{
-            "naga::slabkit::unordered_queue: the default device is not in this queue's context"};
+            dev ? "naga::slabkit::unordered_queue: the default device is not in this queue's context"
+                : "naga::slabkit::unordered_queue: SYCL's default device is not in this queue's context; "
+                  "name the default device with unordered_queue(ctx, dev)"};
 }
 
 sycl::property_list UnorderedState::place(const sycl::device* dev) const {

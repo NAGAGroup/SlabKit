@@ -290,6 +290,25 @@ TEST_CASE("the property_list form honors an AdaptiveCpp_retarget device", "[unor
     }
 }
 
+TEST_CASE("an unordered_queue over a multi-device context defaults to SYCL's default device, not the context's first",
+          "[unordered_queue]") {
+    const context      all{};  // every root device, in platform order
+    const sycl::device dflt{sycl::default_selector_v};
+    unordered_queue    uq{all};
+    REQUIRE(uq.get_device() == dflt);
+    if (all.devices().size() > 1 && all.devices().front() != dflt)
+        REQUIRE(uq.get_device() != all.devices().front());  // this machine tells the two apart
+
+    unordered_queue named{all, all.devices().back()};
+    REQUIRE(named.get_device() == all.devices().back());
+    sycl::device other;
+    if (slabkit_test::second_device(dflt, other)) {
+        const context without{other};
+        REQUIRE_THROWS_AS((unordered_queue{without}), std::invalid_argument);
+        REQUIRE(unordered_queue{without, other}.get_device() == other);
+    }
+}
+
 TEST_CASE("a device outside the context cannot be the default device", "[unordered_queue]") {
     Fixture      f;
     sycl::device other;

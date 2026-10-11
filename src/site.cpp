@@ -10,6 +10,7 @@
 
 #include "naga/slabkit/detail/core.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <new>
 #include <stdexcept>
@@ -120,9 +121,15 @@ Site Site::at(kind k, const sycl::context& ctx) {
     s.ctx_  = ctx;
 
     // Host memory belongs to a context, not a device -- but a construction
-    // kernel still has to run somewhere, so remember one of the context's own.
-    const auto devices = ctx.get_devices();
-    if (!devices.empty()) s.dev_ = devices.front();
+    // kernel still has to run somewhere: SYCL's default device when the context
+    // holds it. Only a context without it (a backend context of other devices)
+    // has nothing better than a device of its own, and then its first is used.
+    const auto         devices = ctx.get_devices();
+    const sycl::device dflt{sycl::default_selector_v};
+    if (std::find(devices.begin(), devices.end(), dflt) != devices.end())
+        s.dev_ = dflt;
+    else if (!devices.empty())
+        s.dev_ = devices.front();
     return s;
 }
 

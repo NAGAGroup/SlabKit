@@ -67,15 +67,18 @@ std::exception_ptr HostErrors::pop() {
 
 QueueState::QueueState(context c, const sycl::device* dev, sycl::async_handler handler)
     : ctx{std::move(c)}
-    , default_device{dev ? *dev : ctx.devices().front()}
+    // SYCL's default device (the one a default-constructed sycl::queue picks), never the context's first device.
+    , default_device{dev ? *dev : sycl::device{sycl::default_selector_v}}
     , primary{make_lane(handler, kPrimaryProps)}
     , group_queue{make_lane(handler, kConcurrentProps)}
     , host_queue{make_lane(handler, kConcurrentProps)}
     , legs{make_lane(handler, kConcurrentProps)}
     , errors{std::make_shared<HostErrors>()} {
-    if (dev && !ctx.contains(*dev))
+    if (!ctx.contains(default_device))
         throw std::invalid_argument{
-            "naga::slabkit::queue: the default device is not in this queue's context"};
+            dev ? "naga::slabkit::queue: the default device is not in this queue's context"
+                : "naga::slabkit::queue: SYCL's default device is not in this queue's context; "
+                  "name the default device with queue(ctx, dev)"};
 }
 
 const sycl::device& QueueState::device_or_default(const sycl::device* dev) const {
@@ -201,13 +204,16 @@ struct operand {
 /// both operands to the host device and becomes a node on the OpenMP backend --
 /// which the next kernel on that device would then have to wait for, and a
 /// non-OpenMP kernel that waits for an OpenMP node never starts.
-operand locate(const context& c, const void* p) {
+///
+/// `fallback` is the stream's default device (SYCL's default device, never the
+/// context's first); it stands for the unrecognised host pointer.
+operand locate(const context& c, const sycl::device& fallback, const void* p) {
     try {
         const sycl::device d = c.get_pointer_device(p);
         const kind         k = c.get_pointer_type(p);
         return operand{k, d, k == kind::host || is_host_backend(d)};
     } catch (const sycl::exception&) {
-        return operand{kind::host, c.devices().front(), true};
+        return operand{kind::host, fallback, true};
     }
 }
 
@@ -242,9 +248,10 @@ sycl::event copy_on(const Sink& s, const sycl::device* dev, void* dst, const voi
                     std::size_t bytes, const std::vector<sycl::event>* extra) {
     if (dst == nullptr || src == nullptr || bytes == 0) return no_op(s, dev, extra);
 
-    const context& c    = s.state().ctx;
-    const operand  from = locate(c, src);
-    const operand  to   = locate(c, dst);
+    const context&      c    = s.state().ctx;
+    const sycl::device& dflt = s.state().default_device;
+    const operand       from = locate(c, dflt, src);
+    const operand       to   = locate(c, dflt, dst);
 
     // Both ends are ordinary memory: a host copy, and no submission.
     if (from.host_side && to.host_side) {
@@ -301,7 +308,7 @@ sycl::event set_on(const Sink& s, const sycl::device* dev, void* p, int value,
                    std::size_t bytes, const std::vector<sycl::event>* extra) {
     if (p == nullptr || bytes == 0) return no_op(s, dev, extra);
 
-    const operand o = locate(s.state().ctx, p);
+    const operand o = locate(s.state().ctx, s.state().default_device, p);
     if (o.host_side) {
         sycl::event e =
             host_item(s, dev, extra, [p, value, bytes] { std::memset(p, value, bytes); });
@@ -344,7 +351,7 @@ sycl::event fill_on(const Sink& s, const sycl::device* dev, void* p, const void*
         return set_on(s, dev, p, static_cast<int>(std::to_integer<unsigned char>(pat[0])), total,
                       extra);
 
-    const operand     o     = locate(s.state().ctx, p);
+    const operand     o     = locate(s.state().ctx, s.state().default_device, p);
     auto*             out   = static_cast<std::byte*>(p);
     const std::size_t psize = pattern_size;
     auto              own   = own_pattern(pattern, psize);

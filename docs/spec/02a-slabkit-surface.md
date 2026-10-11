@@ -157,7 +157,7 @@ public:
     explicit queue(context ctx, sycl::async_handler handler = {});
 
     const context&      get_context() const;
-    const sycl::device& get_device()  const;   // the default device: ctx.devices().front()
+    const sycl::device& get_device()  const;   // the default device: SYCL's default device, never ctx.devices().front()
 
     // ---- kernel work: sycl::queue's surface ---------------------------------
     // `props` may carry AdaptiveCpp_retarget; a device argument is that property

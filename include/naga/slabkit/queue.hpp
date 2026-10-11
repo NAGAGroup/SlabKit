@@ -181,6 +181,11 @@ bool retarget_device(const sycl::property_list& props, sycl::device& out);
 
 class queue {
 public:
+    /// A stream over `ctx` whose default device, which every unplaced task runs on,
+    /// is SYCL's default device (`sycl::device{sycl::default_selector_v}`, the one a
+    /// default-constructed sycl::queue picks), never the context's first device.
+    /// \throws std::invalid_argument if that device is not in `ctx`; name another
+    /// default device with the form below.
     explicit queue(context ctx, sycl::async_handler handler = {})
         : state_{detail::make_queue_state(std::move(ctx), nullptr, std::move(handler))} {}
 
