@@ -44,6 +44,13 @@ struct ContextAccess;
 
 class context {
 public:
+    // ---- every available root device -----------------------------------------
+    /// The default context covers every available root device: every device of
+    /// every platform SYCL reports, in platform order then device order. The
+    /// same selection as the aspect constructor given no aspects. \throws
+    /// std::invalid_argument if SYCL reports no device.
+    context();
+
     // ---- explicit devices ---------------------------------------------------
     explicit context(std::vector<sycl::device> devices);
     explicit context(const sycl::device& dev);

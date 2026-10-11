@@ -44,6 +44,22 @@ TEST_CASE("every device of the context reports its own backend's context", "[con
             REQUIRE_FALSE(ctx.backends()[i] == ctx.backends()[j]);
 }
 
+TEST_CASE("the default context covers every root device SYCL reports", "[context]") {
+    std::vector<sycl::device> expected;
+    for (const auto& p : sycl::platform::get_platforms())
+        for (const auto& d : p.get_devices()) expected.push_back(d);
+
+    const context ctx{};
+
+    REQUIRE(ctx.devices().size() == expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) REQUIRE(ctx.devices()[i] == expected[i]);  // platform order, then device order
+
+    for (const auto& d : expected) {
+        REQUIRE(ctx.contains(d));
+        REQUIRE(ctx.context_of(d) == sycl::queue{d}.get_context());
+    }
+}
+
 TEST_CASE("a device outside the set is rejected everywhere", "[context]") {
     const sycl::device dev{sycl::default_selector_v};
     sycl::device       other;

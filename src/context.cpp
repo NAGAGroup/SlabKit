@@ -168,6 +168,9 @@ std::shared_ptr<const ContextState> build(std::vector<sycl::device> devices) {
 // Constructors
 // -----------------------------------------------------------------------------
 
+// Every available root device: exactly the selection the aspect constructor makes with no aspects.
+context::context() : context(std::initializer_list<aspect>{}) {}
+
 context::context(std::vector<sycl::device> devices) : state_{build(std::move(devices))} {}
 
 context::context(const sycl::device& dev) : state_{build(std::vector<sycl::device>{dev})} {}
