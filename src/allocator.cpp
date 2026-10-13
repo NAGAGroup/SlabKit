@@ -128,7 +128,11 @@ bool AllocRoute::equals(const AllocRoute& other) const noexcept {
         case from::pool: return PoolAccess::impl(*pool_) == PoolAccess::impl(*other.pool_);
         case from::os: break;
     }
-    if (kind_ == kind::host) return true;  // host memory names no device
+    // Host memory belongs to a context: two host routes are equal (one may free what the other allocated, so a usm_vector
+    // move may take the other's storage) only when their memory lives in the same SYCL context.
+    if (kind_ == kind::host)
+        return dev_.has_value() && other.dev_.has_value() &&
+               q_.get_context().context_of(*dev_) == other.q_.get_context().context_of(*other.dev_);
     return dev_.has_value() && other.dev_.has_value() && *dev_ == *other.dev_;
 }
 

@@ -212,3 +212,34 @@ TEST_CASE("reserve frees the old storage once the copy that read it is done", "[
 
     f.q.wait();
 }
+
+
+TEST_CASE("host allocators are equal only within one SYCL context", "[allocator][cross-device]") {
+    context ctx{slabkit_test::all_devices()};
+    queue   q{ctx};
+
+    // devices of one context: equal, however the device is named (host memory belongs to the context)
+    const sycl::device first = ctx.devices().front();
+    allocator<int>     a{q, kind::host, first};
+    allocator<int>     b{q, kind::host, first};
+    REQUIRE(a == b);
+    for (const auto& d : ctx.devices())
+        if (d != first && ctx.context_of(d) == ctx.context_of(first)) REQUIRE(a == allocator<int>{q, kind::host, d});
+
+    // two backends: different contexts are unequal, and a move between them is refused
+    sycl::device other = first;
+    bool         have  = false;
+    for (const auto& d : ctx.devices())
+        if (!(d.get_platform() == first.get_platform())) {
+            other = d;
+            have  = true;
+        }
+    if (!have) SKIP("needs two backends (two contexts)");
+
+    allocator<int> c{q, kind::host, other};
+    REQUIRE_FALSE(a == c);
+
+    usm_vector<int> mine{4, 1, a};
+    usm_vector<int> theirs{c};
+    REQUIRE_THROWS_AS(theirs = std::move(mine), std::invalid_argument);
+}
