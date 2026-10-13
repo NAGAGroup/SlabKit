@@ -223,15 +223,18 @@ Rules:
 - **A host task must never submit work to the OpenMP backend and wait on
   it.** That deadlocks: the wait holds the very lane the submitted work
   needs. Work on *other* backends may be issued and waited freely — that does
-  not consume the host lane's capacity. A copy whose operands are both host
-  USM or plain memory (of any context) is a plain host `memcpy`, never a
-  submission. (r05: OpenMP device memory is device-side like any other
-  backend's; shared memory is device-side too, accessed only through SYCL
-  commands, because host access to shared memory is unsafe while any kernel
-  runs on a device without concurrent managed access -- CUDA on WSL2 and
-  Windows. A SYCL command touches only its own context's USM, so a copy
-  between a device or shared allocation and host USM of another context is
-  staged through pageable memory inside one host task.)
+  not consume the host lane's capacity. A copy whose operands are both
+  host-side (host USM, shared USM or plain memory, of any context) is a plain
+  host `memcpy`, never a submission and never staged. (r05: OpenMP device memory
+  is device-side like any other backend's. A SYCL command touches only its own
+  context's USM, so a copy between a device allocation and host or shared
+  memory of another context is staged through pageable memory inside one host
+  task. Fills and sets of shared memory go through SYCL, because a host loop
+  migrates every page to the host and back. WARNING: copies that touch shared
+  memory from the host assume the device supports concurrent access to shared
+  allocations; CUDA on Windows and WSL2 is the canonical case where that does
+  not hold -- there such a copy can fault if a kernel is running on that
+  device. Know your platform: wait for the device first, or use device memory.)
 - **Ordering across backends is by `depends_on`, and it holds**, because the
   consumer of every cross-backend dependency is the host lane, which honours
   foreign events. slabkit never submits a non-OpenMP operation carrying a
@@ -445,8 +448,8 @@ Rules:
   a host operand cannot see unwritten memory. This is what makes a pageable
   intermediate safe; it is not made safe by the intermediate's kind, and an
   intermediate cannot be USM in two contexts at once anyway.
-- **A copy whose operands are both host-side (host kind, or memory no context
-  knows) is a plain host `memcpy`**, never a submission — a host task that submits to the OpenMP
+- **A copy whose operands are both host-side (host kind, shared kind, or memory
+  no context knows) is a plain host `memcpy`**, never a submission — a host task that submits to the OpenMP
   backend and waits on it deadlocks.
 - Take turns is enforced here: the host task runs after the kernel work it
   was ordered behind, so slabkit never touches shared memory concurrently

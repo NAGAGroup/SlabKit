@@ -191,12 +191,16 @@ struct operand {
     kind         k;
     sycl::device dev;
     /// True when the bytes can be reached with a plain host store: a pointer no
-    /// context knows, or an allocation of the HOST kind. SHARED memory is
-    /// device-side: it is touched only by SYCL commands, because host access to
-    /// shared memory is unsafe while any kernel runs on a device without
-    /// concurrent managed access (CUDA on WSL2 and Windows), and that restriction
-    /// covers the whole device, so no per-allocation ordering can make it safe.
-    /// OpenMP device memory is device-side like any other backend's.
+    /// context knows, an allocation of the HOST kind, or a SHARED one. OpenMP
+    /// device memory is device-side like any other backend's.
+    ///
+    /// WARNING: a host store to shared memory assumes the device supports
+    /// concurrent access to shared allocations. CUDA on Windows and WSL2 is the
+    /// canonical case where that guarantee does not hold: there a copy that touches
+    /// shared memory from the host can fault if a kernel is running on that device.
+    /// Fills and sets of shared memory therefore go through SYCL (see set_on and
+    /// fill_on); a host copy of it is the caller's to order (wait for the device
+    /// first, or use device memory).
     bool host_side;
     /// The backend context the memory belongs to; empty for a pointer no
     /// context knows (ordinary memory, readable from anywhere).
@@ -207,12 +211,13 @@ struct operand {
 /// -- always; there is no unrecognised operand, which is what makes an ordinary
 /// std::vector a legal source or destination.
 ///
-/// A HOST-kind allocation is host-side whatever context it belongs to: the
-/// host reaches it with a plain store. A SYCL command, though, touches only the
-/// USM of its own context, so a copy between a host-side operand and a
-/// device-side one (device or shared kind) is a single backend copy only when
-/// the host-side operand is ordinary memory or belongs to the device side's
-/// context (see copy_on).
+/// A HOST-kind or SHARED allocation is host-side whatever context it belongs to:
+/// the host reaches it with a plain store, so a copy between any two host-side
+/// operands is a std::memcpy in a host task, in any context, and is never
+/// staged. A SYCL command, though, touches only the USM of its own context, so a
+/// copy between a host-side operand and a device-kind one is a single backend
+/// copy only when the host-side operand is ordinary memory or belongs to the
+/// device side's context (see copy_on).
 ///
 /// `fallback` is the stream's default device (SYCL's default device, never the
 /// context's first); it stands for the unrecognised host pointer.
@@ -220,7 +225,7 @@ operand locate(const context& c, const sycl::device& fallback, const void* p) {
     try {
         const sycl::device d = c.get_pointer_device(p);
         const kind         k = c.get_pointer_type(p);
-        return operand{k, d, k == kind::host, c.context_of(d)};
+        return operand{k, d, k == kind::host || k == kind::shared, c.context_of(d)};
     } catch (const sycl::exception&) {
         return operand{kind::host, fallback, true, std::nullopt};
     }
@@ -270,7 +275,7 @@ sycl::event copy_on(const Sink& s, const sycl::device* dev, void* dst, const voi
         return e;
     }
 
-    // One device-side operand (device or shared kind) and one host-side one. A SYCL command touches only
+    // One device-side operand (device kind) and one host-side one (host or shared kind). A SYCL command touches only
     // the USM of its own context, so this is ONE backend copy, issued on the
     // device side's device, only when the host side is ordinary memory or USM of
     // that device's context. Anything else is staged through pageable memory
@@ -362,7 +367,8 @@ sycl::event set_on(const Sink& s, const sycl::device* dev, void* p, int value,
     if (p == nullptr || bytes == 0) return no_op(s, dev, extra);
 
     const operand o = locate(s.state().ctx, s.state().default_device, p);
-    if (o.host_side) {
+    // Shared memory is set through SYCL: a host loop would migrate every page to the host and back.
+    if (o.host_side && o.k != kind::shared) {
         sycl::event e =
             host_item(s, dev, extra, [p, value, bytes] { std::memset(p, value, bytes); });
         s.record(e);
@@ -409,7 +415,8 @@ sycl::event fill_on(const Sink& s, const sycl::device* dev, void* p, const void*
     const std::size_t psize = pattern_size;
     auto              own   = own_pattern(pattern, psize);
 
-    if (o.host_side) {
+    // Shared memory is filled through SYCL (see set_on).
+    if (o.host_side && o.k != kind::shared) {
         sycl::event e = host_item(s, dev, extra, [out, own, psize, total] {
             for (std::size_t i = 0; i < total; ++i) out[i] = (*own)[i % psize];
         });
