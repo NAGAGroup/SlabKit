@@ -192,7 +192,14 @@ work** (see above): it runs off your thread, after the kernel work it was
 ordered behind, and nothing here blocks the caller. `memcpy` and `copy` find
 their operands and choose a route — a direct device-to-device copy when the
 devices share a backend, a host-side copy when both allocations are
-host-accessible, and otherwise a staged copy through a host intermediate. A
+host USM or plain memory (legal across contexts), one backend copy between a
+device or shared allocation and host USM of the same context (or plain memory),
+and otherwise a staged copy through a pageable host intermediate. A SYCL command
+touches only the USM of its own context, so the staged form is what crosses
+contexts. Shared memory is accessed only through SYCL commands, never by a host
+store: host access to shared memory is unsafe while any kernel runs on a device
+without concurrent managed access (CUDA on WSL2 and Windows). OpenMP device
+memory is device-side like any other backend's. A
 plain host pointer is a legal operand.
 
 That ordering is not a nicety. A copy whose host operand is not USM in the

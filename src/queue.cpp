@@ -18,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -190,20 +191,28 @@ struct operand {
     kind         k;
     sycl::device dev;
     /// True when the bytes can be reached with a plain host store: a pointer no
-    /// context knows, an allocation of the HOST kind, or one on the OpenMP
-    /// backend.
+    /// context knows, or an allocation of the HOST kind. SHARED memory is
+    /// device-side: it is touched only by SYCL commands, because host access to
+    /// shared memory is unsafe while any kernel runs on a device without
+    /// concurrent managed access (CUDA on WSL2 and Windows), and that restriction
+    /// covers the whole device, so no per-allocation ordering can make it safe.
+    /// OpenMP device memory is device-side like any other backend's.
     bool host_side;
+    /// The backend context the memory belongs to; empty for a pointer no
+    /// context knows (ordinary memory, readable from anywhere).
+    std::optional<sycl::context> ctx;
 };
 
 /// Where an operand lives. A pointer no backend context knows is a HOST operand
 /// -- always; there is no unrecognised operand, which is what makes an ordinary
 /// std::vector a legal source or destination.
 ///
-/// A HOST-kind allocation is host-side whatever context it belongs to. It has
-/// to be: a copy between two of them, submitted to a device queue, resolves
-/// both operands to the host device and becomes a node on the OpenMP backend --
-/// which the next kernel on that device would then have to wait for, and a
-/// non-OpenMP kernel that waits for an OpenMP node never starts.
+/// A HOST-kind allocation is host-side whatever context it belongs to: the
+/// host reaches it with a plain store. A SYCL command, though, touches only the
+/// USM of its own context, so a copy between a host-side operand and a
+/// device-side one (device or shared kind) is a single backend copy only when
+/// the host-side operand is ordinary memory or belongs to the device side's
+/// context (see copy_on).
 ///
 /// `fallback` is the stream's default device (SYCL's default device, never the
 /// context's first); it stands for the unrecognised host pointer.
@@ -211,9 +220,9 @@ operand locate(const context& c, const sycl::device& fallback, const void* p) {
     try {
         const sycl::device d = c.get_pointer_device(p);
         const kind         k = c.get_pointer_type(p);
-        return operand{k, d, k == kind::host || is_host_backend(d)};
+        return operand{k, d, k == kind::host, c.context_of(d)};
     } catch (const sycl::exception&) {
-        return operand{kind::host, fallback, true};
+        return operand{kind::host, fallback, true, std::nullopt};
     }
 }
 
@@ -261,13 +270,57 @@ sycl::event copy_on(const Sink& s, const sycl::device* dev, void* dst, const voi
         return e;
     }
 
-    // One backend copy. A named device is where it is ISSUED -- placing it
-    // validly is the caller's -- and the device operand decides otherwise. A
-    // host operand is read when the copy RUNS, which is SYCL's own contract
-    // for queue::memcpy: the caller owns that memory until the event
-    // completes.
-    if (from.host_side || to.host_side || direct_between(from, to)) {
-        const sycl::device& on  = dev ? *dev : (to.host_side ? from.dev : to.dev);
+    // One device-side operand (device or shared kind) and one host-side one. A SYCL command touches only
+    // the USM of its own context, so this is ONE backend copy, issued on the
+    // device side's device, only when the host side is ordinary memory or USM of
+    // that device's context. Anything else is staged through pageable memory
+    // inside one host task: the device leg runs on the device's own context, the
+    // host leg is a memcpy.
+    if (from.host_side != to.host_side) {
+        const operand& devside  = from.host_side ? to : from;
+        const operand& hostside = from.host_side ? from : to;
+        const sycl::context& dctx = c.context_of(devside.dev);
+        if (!hostside.ctx || *hostside.ctx == dctx) {
+            // A host operand is read when the copy RUNS, which is SYCL's own
+            // contract for queue::memcpy: the caller owns that memory until
+            // the event completes. A named device is where it is ISSUED.
+            const sycl::device& on  = dev ? *dev : devside.dev;
+            submission          sub = s.begin(&on, extra);
+            sycl::event         e   = sub.target->submit(sub.props, [&](sycl::handler& h) {
+                h.depends_on(sub.deps);
+                h.memcpy(dst, src, bytes);
+            });
+            s.record(e);
+            return e;
+        }
+
+        sycl::queue        legs = s.state().legs;
+        const sycl::device ddev = devside.dev;
+        const bool         down = !from.host_side;  // device side -> host side
+        sycl::event        e    = host_item(s, nullptr, extra, [legs, dctx, ddev, down, dst, src,
+                                                          bytes]() mutable {
+            auto stage = std::vector<std::byte>(bytes);
+            if (down) {
+                legs.submit(sycl::property_list{
+                                sycl::property::command_group::AdaptiveCpp_retarget{dctx, ddev}},
+                            [&](sycl::handler& h) { h.memcpy(stage.data(), src, bytes); })
+                    .wait();
+                std::memcpy(dst, stage.data(), bytes);
+            } else {
+                std::memcpy(stage.data(), src, bytes);
+                legs.submit(sycl::property_list{
+                                sycl::property::command_group::AdaptiveCpp_retarget{dctx, ddev}},
+                            [&](sycl::handler& h) { h.memcpy(dst, stage.data(), bytes); })
+                    .wait();
+            }
+        });
+        s.record(e);
+        return e;
+    }
+
+    // Both device-side with a direct route between them: one backend copy.
+    if (direct_between(from, to)) {
+        const sycl::device& on  = dev ? *dev : to.dev;
         submission          sub = s.begin(&on, extra);
         sycl::event         e   = sub.target->submit(sub.props, [&](sycl::handler& h) {
             h.depends_on(sub.deps);
@@ -488,8 +541,6 @@ std::vector<sycl::event> state_wait_list(QueueState& st) {
 }
 
 QueueState& state_of(const queue& q) { return *q.state_; }
-
-bool is_host_backend(const sycl::device& dev) { return dev.get_backend() == sycl::backend::omp; }
 
 bool retarget_device(const sycl::property_list& props, sycl::device& out) {
     if (!props.has_property<sycl::property::command_group::AdaptiveCpp_retarget>()) return false;

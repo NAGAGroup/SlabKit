@@ -171,9 +171,6 @@ std::vector<sycl::event> state_wait_list(QueueState& st);
 /// which the public surface deliberately does not expose.
 QueueState& state_of(const queue& q);
 
-/// True when `dev` belongs to the OpenMP backend.
-bool is_host_backend(const sycl::device& dev);
-
 /// The device of an AdaptiveCpp_retarget property, if the list carries one.
 bool retarget_device(const sycl::property_list& props, sycl::device& out);
 
