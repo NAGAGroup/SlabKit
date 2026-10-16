@@ -1,9 +1,9 @@
 [workspace]
 authors   = ["Jack Myers <jack@myersjack.dev>"]
 name      = "slabkit"
-version   = "0.1.0"
+version   = "0.3.0"
 channels  = ["https://prefix.dev/jackm97/naga-labs-staging"]
-platforms = ["linux-64"]
+platforms = [{ platform = "linux-64", archspec = "x86_64_v3" }, "linux-aarch64", { platform = "osx-arm64", macos = "26.0" }, { platform = "win-64", archspec = "x86_64_v3" }, "win-arm64"]
 preview   = ["pixi-build"]
 
 # One pool of specs; every table inherits with { workspace = true }.
@@ -12,18 +12,18 @@ slabkit                = { path = "." }
 slabkit-tests          = { path = "tests" }
 catch2                 = ">=3.8"
 naga-acpp-runtime-cuda = "*"
-naga-acpp-tools        = "==2026.10.06"
-nushell                = ">=0.110.0,<0.111"
+naga-acpp-tools        = "==2026.10.15"
+nushell                = ">=0.116.1,<0.117"
 
 # Compiler stems resolve to <stem>_<platform> activation packages; their
 # run-exports bring the toolchain. The backend supplies cmake/ninja.
 [workspace.build-variants]
 c_compiler           = ["naga-acpp-clang"]
 cxx_compiler         = ["naga-acpp-clangxx"]
-c_compiler_version   = ["2026.10.06"]
-cxx_compiler_version = ["2026.10.06"]
+c_compiler_version   = ["2026.10.15"]
+cxx_compiler_version = ["2026.10.15"]
 naga-acpp-llvm       = ["21"]
-cmake                = ["3.31.*"]
+cmake                = ["4.4.*"]
 
 # ---- default environment: the built library and its tests ------------------
 [dependencies]
@@ -33,18 +33,27 @@ slabkit-tests = { workspace = true }
 [tasks]
 test = "slabkit-tests"
 
-# ---- CUDA runtime, opt-in ---------------------------------------------------
-[feature.cuda.dependencies]
-naga-acpp-runtime-cuda = { workspace = true }
+# ---- backends: the runtimes AdaptiveCpp loads, per platform ------------------
+# OpenMP, and Metal on macOS, come built in: osx-arm64 and win-arm64 need nothing here.
+[feature.backends.target.linux-64.dependencies]
+naga-acpp-runtime-cuda       = "*"
+naga-acpp-runtime-level-zero = "*"
 
-[environments.cuda]
-features = ["cuda"]
-solve-group = "default"
+[feature.backends.target.linux-aarch64.dependencies]
+naga-acpp-runtime-cuda = "*"
+
+[feature.backends.target.win-64.dependencies]
+naga-acpp-runtime-cuda       = "*"
+naga-acpp-runtime-level-zero = "*"
+
+# The default environment carries every backend.
+[environments]
+default = ["backends"]
 
 # ---- the library package ----------------------------------------------------
 [package]
 name    = "slabkit"
-version = "0.1.0"
+version = "0.3.0"
 
 [package.build.backend]
 name     = "pixi-build-cmake"
@@ -62,16 +71,20 @@ slabkit       = { path = "." }
 slabkit-tests = { path = "tests" }
 
 [feature.dev.dependencies]
-nushell         = { workspace = true }
+nushell = { workspace = true }
+
+# naga-acpp-tools is not published for osx-arm64 or win-arm64 yet (a known toolchain gap, to be fixed later).
+[feature.dev.target.linux-64.dependencies]
+naga-acpp-tools = { workspace = true }
+
+[feature.dev.target.linux-aarch64.dependencies]
+naga-acpp-tools = { workspace = true }
+
+[feature.dev.target.win-64.dependencies]
 naga-acpp-tools = { workspace = true }
 
 [environments.dev]
-features = ["dev"]
-solve-group = "default"
-no-default-feature = true
-
-[environments.dev-cuda]
-features = ["dev", "cuda"]
+features = ["dev", "backends"]
 solve-group = "default"
 no-default-feature = true
 
