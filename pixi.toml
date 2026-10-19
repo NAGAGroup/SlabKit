@@ -54,6 +54,7 @@ default = ["backends"]
 [package]
 name    = "slabkit"
 version = "0.3.0"
+license = "Apache-2.0"
 
 [package.build.backend]
 name     = "pixi-build-cmake"
