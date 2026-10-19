@@ -1,6 +1,6 @@
 version: 7
 platforms:
-- name: linux-64-archspec-x86-64-v3
+- name: linux-64-v3
   subdir: linux-64
   virtual-packages:
   - __archspec=0=x86_64_v3
@@ -13,13 +13,13 @@ platforms:
   - __linux=4.18
   - __glibc=2.28
   - __archspec=0=aarch64
-- name: osx-arm64-macos-26-0
+- name: osx-arm64-macos26
   subdir: osx-arm64
   virtual-packages:
   - __osx=26.0
   - __unix=0=0
   - __archspec=0=m1
-- name: win-64-archspec-x86-64-v3
+- name: win-64-v3
   subdir: win-64
   virtual-packages:
   - __archspec=0=x86_64_v3
@@ -33,7 +33,7 @@ environments:
     channels:
     - url: https://prefix.dev/jackm97/naga-labs-staging/
     packages:
-      linux-64-archspec-x86-64-v3:
+      linux-64-v3:
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
       - conda: https://prefix.dev/conda-forge/linux-64/catch2-3.16.1-h4dbf13b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cuda-cudart-12.9.79-h5888daf_0.conda
@@ -92,7 +92,7 @@ environments:
       - conda: https://prefix.dev/jackm97/naga-labs-staging/noarch/naga-acpp-llvm-23.0git-hfc7a621_0.conda
       - conda_source: slabkit-tests[c376ddcc] @ tests
       - conda_source: slabkit[2c2c4245] @ .
-      osx-arm64-macos-26-0:
+      osx-arm64-macos26:
       - conda: https://prefix.dev/conda-forge/osx-arm64/catch2-3.16.1-hfbe1efa_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/icu-78.3-py310h579977c_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libcxx-23.1.3-h55c6f16_0.conda
@@ -108,7 +108,7 @@ environments:
       - conda: https://prefix.dev/jackm97/naga-labs-staging/osx-arm64/naga-acpp-runtime-2026.10.19-llvm23_0_0_hc9da9e4_0.conda
       - conda_source: slabkit-tests[0ebb425f] @ tests
       - conda_source: slabkit[a30c004a] @ .
-      win-64-archspec-x86-64-v3:
+      win-64-v3:
       - conda: https://prefix.dev/conda-forge/noarch/_x86_64-microarch-level-3-5_level3.conda
       - conda: https://prefix.dev/conda-forge/noarch/cuda-cudart_win-64-12.9.79-he0c23c2_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/cuda-version-12.9-h4f385c5_3.conda
@@ -155,7 +155,7 @@ environments:
     channels:
     - url: https://prefix.dev/jackm97/naga-labs-staging/
     packages:
-      linux-64-archspec-x86-64-v3:
+      linux-64-v3:
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_impl_linux-64-2.46.1-default_hfdba357_103.conda
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_linux-64-2.46.1-default_h4852527_103.conda
@@ -284,7 +284,7 @@ environments:
       - conda: https://prefix.dev/jackm97/naga-labs-staging/linux-aarch64/naga-acpp-runtime-cuda-2026.10.19-llvm23_0_0_ha8932ee_0.conda
       - conda: https://prefix.dev/jackm97/naga-labs-staging/linux-aarch64/naga-acpp-tools-2026.10.19-llvm23_0_0_had789ca_0.conda
       - conda: https://prefix.dev/jackm97/naga-labs-staging/noarch/naga-acpp-llvm-23.0git-hfc7a621_0.conda
-      osx-arm64-macos-26-0:
+      osx-arm64-macos26:
       - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.7.22-hbd8a1cb_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/libcxx-headers-23.1.3-h707e725_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/python_abi-3.15-9_cp315.conda
@@ -338,7 +338,8 @@ environments:
       - conda: https://prefix.dev/jackm97/naga-labs-staging/osx-arm64/naga-acpp-clang_osx-arm64-2026.10.19-llvm23_0_0_ha83d436_0.conda
       - conda: https://prefix.dev/jackm97/naga-labs-staging/osx-arm64/naga-acpp-clangxx_osx-arm64-2026.10.19-llvm23_0_0_h255c3f5_0.conda
       - conda: https://prefix.dev/jackm97/naga-labs-staging/osx-arm64/naga-acpp-runtime-2026.10.19-llvm23_0_0_hc9da9e4_0.conda
-      win-64-archspec-x86-64-v3:
+      - conda: https://prefix.dev/jackm97/naga-labs-staging/osx-arm64/naga-acpp-tools-2026.10.19-llvm23_0_0_h1f9ac7f_0.conda
+      win-64-v3:
       - conda: https://prefix.dev/conda-forge/noarch/_x86_64-microarch-level-3-5_level3.conda
       - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.7.22-h4c7d964_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/cuda-cudart_win-64-12.9.79-he0c23c2_0.conda
@@ -427,11 +428,12 @@ environments:
       - conda: https://prefix.dev/jackm97/naga-labs-staging/win-arm64/naga-acpp-clangxx_win-arm64-2026.10.19-llvm23_0_0_h18f2859_0.conda
       - conda: https://prefix.dev/jackm97/naga-labs-staging/win-arm64/naga-acpp-compiler-rt-2026.10.19-llvm23_0_0_h536da61_0.conda
       - conda: https://prefix.dev/jackm97/naga-labs-staging/win-arm64/naga-acpp-runtime-2026.10.19-llvm23_0_0_h3c7c71f_0.conda
+      - conda: https://prefix.dev/jackm97/naga-labs-staging/win-arm64/naga-acpp-tools-2026.10.19-llvm23_0_0_h9b98796_0.conda
   git:
     channels:
     - url: https://prefix.dev/jackm97/naga-labs-staging/
     packages:
-      linux-64-archspec-x86-64-v3:
+      linux-64-v3:
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
       - conda: https://prefix.dev/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
       - conda: https://prefix.dev/conda-forge/linux-64/c-ares-1.34.8-hebe6cf0_2.conda
@@ -485,7 +487,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/perl-5.44.0-1_h5bc82ec_perl5.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/zstd-1.5.7-h9d15635_7.conda
       - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.7.22-hbd8a1cb_0.conda
-      osx-arm64-macos-26-0:
+      osx-arm64-macos26:
       - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.7.22-hbd8a1cb_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/bzip2-1.0.8-h4e30115_10.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/c-ares-1.34.8-h74c22ad_2.conda
@@ -508,7 +510,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/pcre2-10.47-he63d830_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/perl-5.44.0-1_hb001647_perl5.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/zstd-1.5.7-hf451053_7.conda
-      win-64-archspec-x86-64-v3:
+      win-64-v3:
       - conda: https://prefix.dev/conda-forge/win-64/git-2.56.0-h57928b3_0.conda
       win-arm64:
       - conda: https://prefix.dev/conda-forge/win-arm64/git-2.56.0-ha03c420_0.conda
@@ -4128,6 +4130,28 @@ packages:
     - naga-acpp-llvm ==23.0git
   size: 56350818
   timestamp: 1792388132735
+- conda: https://prefix.dev/jackm97/naga-labs-staging/osx-arm64/naga-acpp-tools-2026.10.19-llvm23_0_0_h1f9ac7f_0.conda
+  sha256: 135a47a3de6d522965944df0f64613c95c567b5f19a5c35f2ab693fac7e82480
+  md5: b4f26689de2c6f26b921d773f712dd24
+  depends:
+  - naga-acpp-runtime ==2026.10.19 llvm23_0_0_hc9da9e4_0
+  - python >=3.9
+  - __osx >=26.0
+  - libcxx >=23
+  - zstd >=1.5.7,<1.6.0a0
+  - naga-acpp-llvm ==23.0git
+  - libzlib >=1.3.2,<2.0a0
+  constrains:
+  - clang-tools <23.0a0|>=24.0a0
+  - clang-format <23.0a0|>=24.0a0
+  - clang-scan-deps <23.0a0|>=24.0a0
+  - clang-format-23 <0.0a0
+  - acpp-tools <0.0a0
+  - acpp-tools-nightly <0.0a0
+  license: Apache-2.0 WITH LLVM-exception
+  run_exports: {}
+  size: 9186637
+  timestamp: 1792388132735
 - conda: https://prefix.dev/jackm97/naga-labs-staging/win-64/naga-acpp-2026.10.19-llvm23_0_0_he9d73c8_0.conda
   sha256: 6a27a5f3c15a8725cd74f77f83213052e68aba594f2982dcd5e8cff8047a5b43
   md5: d1e7344ffdfe7e3b590fc29f206e5148
@@ -4436,6 +4460,28 @@ packages:
     - naga-acpp-runtime ==2026.10.19 llvm23_0_0_h3c7c71f_0
     - naga-acpp-llvm ==23.0git
   size: 42272817
+  timestamp: 1792388367149
+- conda: https://prefix.dev/jackm97/naga-labs-staging/win-arm64/naga-acpp-tools-2026.10.19-llvm23_0_0_h9b98796_0.conda
+  sha256: b8cbce292ca1ff78e7c482f76b3a983b5ee28966df635fc2aebdb988ba585913
+  md5: 6e82fd001ff8a099690e93ed0d8fc206
+  depends:
+  - naga-acpp-runtime ==2026.10.19 llvm23_0_0_h3c7c71f_0
+  - python >=3.9
+  - vc >=14.5,<15
+  - vc14_runtime >=14.51.36247
+  - naga-acpp-llvm ==23.0git
+  - zstd >=1.5.7,<1.6.0a0
+  - libzlib >=1.3.2,<2.0a0
+  constrains:
+  - clang-tools <23.0a0|>=24.0a0
+  - clang-format <23.0a0|>=24.0a0
+  - clang-scan-deps <23.0a0|>=24.0a0
+  - clang-format-23 <0.0a0
+  - acpp-tools <0.0a0
+  - acpp-tools-nightly <0.0a0
+  license: Apache-2.0 WITH LLVM-exception
+  run_exports: {}
+  size: 213591634
   timestamp: 1792388367149
 - conda_source: slabkit-tests[0ebb425f] @ tests
   variants:

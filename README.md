@@ -7,9 +7,7 @@ Built for AdaptiveCpp's generic compilation flow. It is a compiled shared
 library, not a header-only one.
 
 Platforms: linux-64 (x86-64-v3), linux-aarch64, osx-arm64 (macOS 26), win-64
-(x86-64-v3) and win-arm64. Status: experimental. The API is still changing, and
-the toolchain's packages are not yet published for every platform (the `dev`
-environment lacks `naga-acpp-tools` on osx-arm64 and win-arm64).
+(x86-64-v3) and win-arm64. Status: experimental. The API is still changing.
 
 ```cpp
 #include <naga/slabkit/slabkit.hpp>
