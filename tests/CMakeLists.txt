@@ -25,5 +25,11 @@ add_executable(slabkit-tests ${SLABKIT_TEST_SOURCES})
 add_sycl_to_target(TARGET slabkit-tests SOURCES ${SLABKIT_TEST_SOURCES})
 target_link_libraries(slabkit-tests PRIVATE naga::slabkit Catch2::Catch2WithMain)
 
+# On Windows the Catch2 library comes from a build that does not define StringMaker<std::byte>, while this clang build sees C++17
+# and declares it, which leaves an undefined symbol at link time. Tell the header not to declare it.
+if(WIN32)
+    target_compile_definitions(slabkit-tests PRIVATE CATCH_CONFIG_NO_CPP17_BYTE)
+endif()
+
 include(GNUInstallDirs)
 install(TARGETS slabkit-tests RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
