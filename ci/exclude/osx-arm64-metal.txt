@@ -1,2 +1,19 @@
 # Exact Catch2 test names to skip on this platform and backend, one per line; see ci/known-failures.md.
+a kernel with a dependency does not run until the event completes
+a kernel without dependencies is not ordered after earlier work on the stream
+an async_host task runs after its dependency, and its exception surfaces
+wait returns only after all submitted work has finished
+usm_vector::read_deps includes registered writes, and a task depending on it waits
 a task on the unordered stream that depends on a container's write list waits for a writer on that stream
+outside readers do not wait on each other
+a writer waits for an in-flight reader
+outside writes do not wait on each other
+a registered write delays a later fill, resize or copy-assign
+assign orders against both containers
+an event list is handed out whole: every registered event is in it
+a free waits on both lists
+sync waits on both lists
+a copy out to the host waits on the write list and registers a read
+the event lists travel with a move
+a registration that makes a list longer than 8 events drops the completed ones
+the extra-dependency overloads order after the given events
