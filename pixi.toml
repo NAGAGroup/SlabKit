@@ -12,7 +12,7 @@ slabkit                = { path = "." }
 slabkit-tests          = { path = "tests" }
 catch2                 = ">=3.8"
 naga-acpp-runtime-cuda = "*"
-naga-acpp-tools        = "==2026.10.15"
+naga-acpp-tools        = "==2026.10.19"
 nushell                = ">=0.116.1,<0.117"
 
 # Compiler stems resolve to <stem>_<platform> activation packages; their
@@ -20,9 +20,9 @@ nushell                = ">=0.116.1,<0.117"
 [workspace.build-variants]
 c_compiler           = ["naga-acpp-clang"]
 cxx_compiler         = ["naga-acpp-clangxx"]
-c_compiler_version   = ["2026.10.15"]
-cxx_compiler_version = ["2026.10.15"]
-naga-acpp-llvm       = ["21"]
+c_compiler_version   = ["2026.10.19"]
+cxx_compiler_version = ["2026.10.19"]
+naga-acpp-llvm       = ["23"]
 cmake                = ["4.4.*"]
 
 # ---- default environment: the built library and its tests ------------------
