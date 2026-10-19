@@ -38,3 +38,22 @@ The other sixteen are excluded on the same mechanism, found by scanning the sour
 - `the event lists travel with a move`
 - `a registration that makes a list longer than 8 events drops the completed ones`
 - `the extra-dependency overloads order after the given events`
+
+## Intermittent, real bug, not excluded
+
+`a group mixes kernel and memory subtasks, and is one task to both sides` (`tests/test_host_work.cpp:273`). Not excluded on any
+platform: it looks like a genuine ordering violation in the group's join, not a platform quirk. Two sightings so far:
+
+| when | where | result |
+|---|---|---|
+| local, after the pixi manifest change | linux-64, OpenMP | `tests/test_host_work.cpp:295: FAILED: REQUIRE( p[0] == 29 ) with expansion: 9 == 29` |
+| CI run 39214204546 | linux-aarch64, OpenMP | `tests/test_host_work.cpp:295: FAILED: REQUIRE( p[0] == 29 ) with expansion: 9 == 29` |
+
+The test sets `p[0] = 2`, runs a group of three unordered subtasks (a kernel `p[1] = p[0] * 10`, a `memcpy` into `p[2]`, a `fill` of
+`p[3]` with 7), then a kernel `p[0] = p[1] + p[2] + p[3]`. Expected 20 + 2 + 7 = 29. `9 = 0 + 2 + 7`: the memcpy and the fill had
+finished, but the kernel after the group read `p[1]` before the group's kernel subtask wrote it. The next item did not wait for
+the whole group.
+
+Rates: 2 failures in about 15 full-suite runs on OpenMP (1 of 11 locally, 1 of 4 on linux-aarch64 CI); 0 of 300 runs of the test
+alone (OpenMP, old and new lock, and CUDA). The same suite on CUDA (linux-64, win-64) and Windows OpenMP passed in CI. Details:
+`/home/jack/tmp/omp-order/group-join.md`.
