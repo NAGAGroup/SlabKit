@@ -18,6 +18,8 @@ slabkit                = { path = "." }
 slabkit-tests          = { path = "tests" }
 catch2                 = ">=3.8"
 naga-acpp-runtime-cuda = "*"
+naga-acpp-runtime-ocl  = "*"
+intel-opencl-rt        = "*"
 naga-acpp-tools        = "==2026.10.19"
 nushell                = ">=0.116.1,<0.117"
 
@@ -95,3 +97,15 @@ setup-git = "git config core.hooksPath .project/hooks"
 [environments.git]
 features = ["git"]
 no-default-feature = true
+
+# OpenCL on Intel's CPU runtime (conda-forge intel-opencl-rt, proprietary Intel EULA; test environments only), linux-64 only.
+# conda-forge is added to this feature alone.
+[feature.ocl]
+channels = ["conda-forge"]
+
+[feature.ocl.target.linux-64.dependencies]
+naga-acpp-runtime-ocl = { workspace = true }
+intel-opencl-rt       = { workspace = true }
+
+[environments.ocl]
+features = ["ocl"]
