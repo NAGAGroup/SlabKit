@@ -42,12 +42,13 @@ The other sixteen are excluded on the same mechanism, found by scanning the sour
 ## Intermittent, real bug, not excluded
 
 `a group mixes kernel and memory subtasks, and is one task to both sides` (`tests/test_host_work.cpp:273`). Not excluded on any
-platform: it looks like a genuine ordering violation in the group's join, not a platform quirk. Two sightings so far:
+platform: it looks like a genuine ordering violation in the group's join, not a platform quirk. Three sightings so far:
 
 | when | where | result |
 |---|---|---|
 | local, after the pixi manifest change | linux-64, OpenMP | `tests/test_host_work.cpp:295: FAILED: REQUIRE( p[0] == 29 ) with expansion: 9 == 29` |
 | CI run 39214204546 | linux-aarch64, OpenMP | `tests/test_host_work.cpp:295: FAILED: REQUIRE( p[0] == 29 ) with expansion: 9 == 29` |
+| CI run 39214806328 | linux-aarch64, OpenMP | the same: `9 == 29` |
 
 The test sets `p[0] = 2`, runs a group of three unordered subtasks (a kernel `p[1] = p[0] * 10`, a `memcpy` into `p[2]`, a `fill` of
 `p[3]` with 7), then a kernel `p[0] = p[1] + p[2] + p[3]`. Expected 20 + 2 + 7 = 29. `9 = 0 + 2 + 7`: the memcpy and the fill had
