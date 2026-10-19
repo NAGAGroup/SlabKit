@@ -55,6 +55,6 @@ The test sets `p[0] = 2`, runs a group of three unordered subtasks (a kernel `p[
 finished, but the kernel after the group read `p[1]` before the group's kernel subtask wrote it. The next item did not wait for
 the whole group.
 
-Rates: 2 failures in about 15 full-suite runs on OpenMP (1 of 11 locally, 1 of 4 on linux-aarch64 CI); 0 of 300 runs of the test
+Rates: 3 failures in about 16 full-suite runs on OpenMP (1 of 11 locally, 2 of 5 on linux-aarch64 CI: runs 4 and 5 failed, runs 1 to 3 passed); 0 of 300 runs of the test
 alone (OpenMP, old and new lock, and CUDA). The same suite on CUDA (linux-64, win-64) and Windows OpenMP passed in CI. Details:
 `/home/jack/tmp/omp-order/group-join.md`.
