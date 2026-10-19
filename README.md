@@ -6,6 +6,11 @@ in-order stream of work, and copies that route themselves.
 Built for AdaptiveCpp's generic compilation flow. It is a compiled shared
 library, not a header-only one.
 
+Platforms: linux-64 (x86-64-v3), linux-aarch64, osx-arm64 (macOS 26), win-64
+(x86-64-v3) and win-arm64. Status: experimental. The API is still changing, and
+the toolchain's packages are not yet published for every platform (the `dev`
+environment lacks `naga-acpp-tools` on osx-arm64 and win-arm64).
+
 ```cpp
 #include <naga/slabkit/slabkit.hpp>
 namespace sk = naga::slabkit;
@@ -14,7 +19,7 @@ sk::context ctx{sycl::device{sycl::gpu_selector_v}};
 sk::queue   q{ctx};
 
 auto data = sk::malloc_device<float>(1 << 20, q);   // owning handle
-sk::fill(q, data.get(), 1.0f, 1 << 20);
+q.fill(data.get(), 1.0f, 1 << 20);
 q.parallel_for(sycl::range<1>{1 << 20},
                [p = data.get()](sycl::id<1> i) { p[i[0]] *= 2.0f; });
 q.wait();
@@ -25,7 +30,7 @@ q.wait();
 | | |
 |---|---|
 | `context` | the device set, one `sycl::context` per backend, and the answers to what the machine can do |
-| `queue` | one stream over that context: kernel work and host work, placement, groups and chains |
+| `queue` | one stream over that context: kernel tasks, host and memory tasks, placement, groups |
 | `malloc_*` / `aligned_alloc_*` | uninitialized storage, SYCL's names and signatures |
 | `make_unique_*` / `make_shared_*` | constructed objects, `std::make_unique`'s forms |
 | `DeviceArena` / `DevicePool` | a bump region and a fixed-node free list, each over one slab |
@@ -67,11 +72,14 @@ failure is a crash on free rather than an error.
 
 ## The queue
 
-One logical in-order stream. Work submitted later observes work submitted
-earlier, on whichever device it ran.
+One logical stream over the context. Three kinds of submission:
+
+- **Kernel tasks** (`submit`, `single_task`, `parallel_for`) run in the order they were submitted, on whichever device they name.
+- **Host and memory tasks** (`async_host`, `memcpy`, `copy`, `memset`, `fill`) run off your thread. They are ordered against kernel tasks and group tasks in both directions, but are asynchronous with respect to each other.
+- **Group tasks** (`submit_group`): the subtasks, any mix of the two kinds above, are unordered among themselves and count as one task to everything outside the group.
 
 ```cpp
-sk::queue q{ctx};                     // optionally: async handler, host-thread count
+sk::queue q{ctx};                     // optionally: an async handler
 
 q.single_task([]{ ... });                        // on the default device
 q.single_task(other_device, []{ ... });          // placed
@@ -83,6 +91,9 @@ q.wait();  q.wait_and_throw();  q.throw_asynchronous();
 q.get_wait_list();                    // the events to hand to depends_on
 ```
 
+Every shortcut has four forms: `(args)`, `(dev, args)`, `(deps, args)` and `(dev, deps, args)`, where
+`deps` is a `std::vector<sycl::event>`. Ordering is by merging wait lists when you submit, never by waiting.
+
 **A group is N submissions that are one step.** They run concurrently; the next
 item waits for all of them.
 
@@ -93,54 +104,41 @@ auto events = q.submit_group([&](sk::queue::group& g) {
 });
 ```
 
-**Host work is the other half of the stream.** Anything that runs on the host
-— including every copy — is host work. It runs off your thread, after the
-kernel work outstanding when you submitted it, and gives you an ordinary
-event.
+**Host work runs on the host, off your thread.** `async_host` takes any callable. It runs after the
+kernel work outstanding when you submitted it, and gives you an ordinary event.
 
 ```cpp
-sycl::event done = q.submit_host([p = data.get()] {
+sycl::event done = q.async_host([p = data.get()] {
     use_on_the_host(p);              // runs after the kernel work above it
 });
-q.sync_host_work();                  // wait the host side alone
+q.async_host(std::vector<sycl::event>{done}, [&] { ship_it(); });   // ordered after `done`
 ```
 
-Kernel work is in order with kernel work; host work carries no dependency on
-other host work; and the two interlock — all outstanding host work finishes
-before the next kernel item starts, and all outstanding kernel work finishes
-before the next host item starts. That is what makes the stream feel in order
-without forcing everything into one line.
+Ordering between two host or memory tasks is yours: hand the first one's event to the second, or use the
+`_in_order` variant (`async_host_in_order`, `memcpy_in_order`, `copy_in_order`, `memset_in_order`,
+`fill_in_order`), which joins the kernel order instead. Raw pointers are yours too: a task orders itself
+against the stream, not against the bytes it names.
 
-When host work *must* be ordered against other host work, chain it. A chain
-is one host item as far as the stream is concerned:
-
-```cpp
-q.submit_chain([&](sk::queue::chain& c) {
-    c.then([&] { stage_it(); });
-    c.then([&] { ship_it(); });      // begins after the first completes
-});
-```
-
-And when you want host work to run *alongside* kernel work rather than
-interlocked with it, put both in a group:
+A group can mix kernel work and host work, which is how you run them side by side:
 
 ```cpp
 q.submit_group([&](sk::queue::group& g) {
     g.submit(dev, [&](sycl::handler& h) { h.parallel_for(r, kernel); });
-    g.submit_host([&] { prepare_the_next_batch(); });
+    g.async_host([&] { prepare_the_next_batch(); });
 });
 ```
 
-A host task's exception is asynchronous: it surfaces from `wait_and_throw`,
-`throw_asynchronous` or `sync_host_work_and_throw`, never at the call.
+A host task's exception is asynchronous: it surfaces from `wait_and_throw` or
+`throw_asynchronous`, never at the call.
 
-One limit worth knowing: AdaptiveCpp's OpenMP backend offers a single
-execution lane per device for the whole process, so host items run one at a
-time even though nothing orders them. slabkit does not add a dependency
-between them, so an implementation with more lanes runs them concurrently
-with no change to your code.
+`wait()` or `wait_and_throw()` is the last thing a program does with its queue before it shuts down:
+destruction does not drain, and work still running at program exit is illegal.
 
 Every member is safe to call from any thread.
+
+An `unordered_queue` is the fully out-of-order stream: kernel tasks and `async_host` only, ordered
+by nothing but the events you pass. It has no memory operations or groups; containers and
+allocators use `queue`.
 
 ## Allocating
 
@@ -187,8 +185,8 @@ allocations are node-size aligned.
 
 ## Copying
 
-The four mirrors take the stream and return an event. **Every copy is host
-work** (see above): it runs off your thread, after the kernel work it was
+The four mirrors are members of the queue and return an event. **Every copy is a
+host and memory task** (see above): it runs off your thread, after the kernel work it was
 ordered behind, and nothing here blocks the caller. `memcpy` and `copy` find
 their operands and choose a route — a direct device-to-device copy when the
 devices share a backend, a host-side copy when both allocations are
@@ -208,17 +206,17 @@ device first or use device memory. A
 plain host pointer is a legal operand.
 
 That ordering is not a nicety. A copy whose host operand is not USM in the
-issuing queue''s context has that operand read when the copy is *issued*, so a
+issuing queue's context has that operand read when the copy is *issued*, so a
 dependency cannot protect it; slabkit never issues a copy until what it
 depends on has already finished.
 
 ```cpp
-sk::memcpy(q, dst, src, bytes);
-sk::copy(q, src, dst, count);                 // typed
-sk::copy(q, device_ptr, host_vector.data(), count);
-sk::memset(q, p, 0, bytes);
-sk::fill(q, p, 3.5f, count);
-// each also takes a std::vector<sycl::event> of dependencies
+q.memcpy(dst, src, bytes);
+q.copy(src, dst, count);                      // typed
+q.copy(device_ptr, host_vector.data(), count);
+q.memset(p, 0, bytes);
+q.fill(p, 3.5f, count);
+// each also takes a device and/or a std::vector<sycl::event> of dependencies in front, and has an _in_order variant
 sk::context::copy_routes(kind_a, dev_a, kind_b, dev_b);   // what routes exist, best first
 ```
 
@@ -296,12 +294,14 @@ the runtime.
 ## Building
 
 ```
-pixi run -e dev-cuda build      # or dev-omp, dev-l0, dev-ocl, dev-amd
-pixi run -e dev-cuda test
+pixi run test                  # builds the library and its tests, runs them
 ```
 
-Each environment carries the backends it names and constrains the runtime to
-them, so a test run exercises what its name says.
+The default environment carries every runtime backend for its platform: CUDA and
+Level Zero on linux-64 and win-64, CUDA on linux-aarch64. OpenMP, and Metal on
+macOS, come built in. The `dev` environment holds the full build closure with the
+toolchain, for working on the library with CMake presets (`default`, `release`,
+`dev`, `dev-debug`) and `scripts/configure.nu`, `build.nu` and `test.nu`.
 
 Consuming it:
 
@@ -323,3 +323,7 @@ work on another stream. Doing so is a segmentation fault, typically intermittent
 wait every stream that uses the device (`queue::wait()`) before touching shared
 memory from the host, or use device-kind containers with `host_view()` and
 `from_host()`, which are safe everywhere.
+
+## License
+
+Apache-2.0. Copyright 2026 Jack Myers. See `LICENSE` and `NOTICE`.
