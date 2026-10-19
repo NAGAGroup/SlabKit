@@ -54,10 +54,6 @@ jobs:
         continue-on-error: true
         timeout-minutes: 60
         run: pixi install -e ocl 2>&1 | tee -a "$GITHUB_WORKSPACE/logs/install-ocl.log"
-      - name: "Visible backends"
-        id: backends
-        continue-on-error: true
-        run: pixi run -e default acpp-info -l 2>&1 | tee -a "$GITHUB_WORKSPACE/logs/backends.log"
       - name: "slabkit-tests on OpenMP"
         id: omp
         continue-on-error: true
