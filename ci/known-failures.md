@@ -39,27 +39,12 @@ The other sixteen are excluded on the same mechanism, found by scanning the sour
 - `a registration that makes a list longer than 8 events drops the completed ones`
 - `the extra-dependency overloads order after the given events`
 
-## Intermittent, real bug, not excluded
+## Fixed
 
-`a group mixes kernel and memory subtasks, and is one task to both sides` (`tests/test_host_work.cpp:273`). Not excluded on any
-platform: it looks like a genuine ordering violation in the group's join, not a platform quirk. Three sightings so far:
+### `a group mixes kernel and memory subtasks, and is one task to both sides` (`tests/test_host_work.cpp:273`)
 
-| when | where | result |
-|---|---|---|
-| local, after the pixi manifest change | linux-64, OpenMP | `tests/test_host_work.cpp:295: FAILED: REQUIRE( p[0] == 29 ) with expansion: 9 == 29` |
-| CI run 39214204546 | linux-aarch64, OpenMP | `tests/test_host_work.cpp:295: FAILED: REQUIRE( p[0] == 29 ) with expansion: 9 == 29` |
-| CI run 39214806328 | linux-aarch64, OpenMP | the same: `9 == 29` |
-
-The test sets `p[0] = 2`, runs a group of three unordered subtasks (a kernel `p[1] = p[0] * 10`, a `memcpy` into `p[2]`, a `fill` of
-`p[3]` with 7), then a kernel `p[0] = p[1] + p[2] + p[3]`. Expected 20 + 2 + 7 = 29. `9 = 0 + 2 + 7`: the memcpy and the fill had
-finished, but the kernel after the group read `p[1]` before the group's kernel subtask wrote it. The next item did not wait for
-the whole group.
-
-Rates: 3 failures in about 16 full-suite runs on OpenMP (1 of 11 locally, 2 of 5 on linux-aarch64 CI: runs 4 and 5 failed, runs 1 to 3 passed); 0 of 300 runs of the test
-alone (OpenMP, old and new lock, and CUDA). The same suite on CUDA (linux-64, win-64) and Windows OpenMP passed in CI. Details:
+Fixed in fork `1b335c2` / toolchain 2026.10.19 build 1: `dag_node` left its execution lane and index uninitialised, so recycled
+async-host nodes could cancel a real dependency. Before the fix it failed intermittently on OpenMP (linux-64 locally; linux-aarch64 in CI runs
+39214204546 and 39214806328) as `tests/test_host_work.cpp:295: FAILED: REQUIRE( p[0] == 29 ) with expansion: 9 == 29`: the kernel after the
+group read `p[1]` before the group's kernel subtask wrote it. It was never excluded on any platform. Details of the sightings:
 `/home/jack/tmp/omp-order/group-join.md`.
-
-The value is identical every time (`9 == 29`, i.e. 0 + 2 + 7), across x86-64 and aarch64 and across all three sightings, which points at one
-deterministic failure mode (the after-group kernel runs before the group's kernel subtask) rather than a random corruption. The
-linux-aarch64 CI runner is a practical reproducer: it failed 2 of its first 5 runs (OpenMP), where the same test failed 0 of 300 times
-alone locally. Re-running that job a few times is the quickest way to see it.
