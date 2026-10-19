@@ -37,6 +37,12 @@ set(SLABKIT_SOURCES
 add_library(naga-slabkit SHARED ${SLABKIT_SOURCES})
 add_library(naga::slabkit ALIAS naga-slabkit)
 
+# A Windows DLL exports nothing by default and the library has no export macros, so export every symbol, as an ELF or
+# Mach-O shared library does.
+if(WIN32)
+    set_target_properties(naga-slabkit PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 target_include_directories(naga-slabkit
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
