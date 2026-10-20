@@ -14,7 +14,7 @@ preview   = ["pixi-build"]
 
 # One pool of specs; every table inherits with { workspace = true }.
 [workspace.dependencies]
-slabkit                = { path = "." }
+slabkit                = { path = "slabkit" }
 slabkit-tests          = { path = "tests" }
 catch2                 = ">=3.8"
 naga-acpp-runtime-cuda = "*"
@@ -58,25 +58,9 @@ naga-acpp-runtime-level-zero = "*"
 [environments]
 default = ["backends"]
 
-# ---- the library package ----------------------------------------------------
-[package]
-name    = "slabkit"
-version = "0.3.0"
-license = "Apache-2.0"
-
-[package.build.backend]
-name     = "pixi-build-cmake"
-version  = "*"
-channels = ["https://prefix.dev/pixi-build-backends"]
-
-[package.build.config]
-# Headers are installed, not compiled; without this, editing one does not
-# invalidate pixi's build cache.
-extra-input-globs = ["include/**/*.hpp"]
-
 # ---- dev environment: full build closure of both packages, neither built -----
 [feature.dev.dev]
-slabkit       = { path = "." }
+slabkit       = { path = "slabkit" }
 slabkit-tests = { path = "tests" }
 
 [feature.dev.dependencies]
