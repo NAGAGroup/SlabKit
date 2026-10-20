@@ -6,12 +6,10 @@
 //
 // Internal; not installed.
 //
-// FOUR sycl::queues, all AdaptiveCpp_retargetable and none constructed with a
+// THREE sycl::queues, all AdaptiveCpp_retargetable and none constructed with a
 // device: the PRIMARY carries the in-order property and takes kernel tasks and
-// the _in_order memory tasks, the GROUP queue takes a group's subtasks, the
-// HOST/MEMORY queue takes the asynchronous memory tasks, and the LEGS queue is
-// where a staged copy issues its two legs from inside the host task that owns
-// them. A submission reaches a device through AdaptiveCpp_retarget, naming the
+// the _in_order memory tasks, the GROUP queue takes a group's subtasks, and the
+// HOST/MEMORY queue takes the asynchronous memory tasks. A submission reaches a device through AdaptiveCpp_retarget, naming the
 // device and the context this stream's slabkit context holds for that device's
 // backend.
 //
@@ -66,11 +64,6 @@ public:
     sycl::queue primary;
     sycl::queue group_queue;
     sycl::queue host_queue;
-
-    /// Where a staged copy issues its two legs, from inside the host task that
-    /// owns them. Nothing merges against it: the task waits each leg before it
-    /// returns, so the task's own event is the whole of that copy's ordering.
-    sycl::queue legs;
 
     std::shared_ptr<HostErrors> errors;
 };

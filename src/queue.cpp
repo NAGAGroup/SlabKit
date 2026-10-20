@@ -73,7 +73,6 @@ QueueState::QueueState(context c, const sycl::device* dev, sycl::async_handler h
     , primary{make_lane(handler, kPrimaryProps)}
     , group_queue{make_lane(handler, kConcurrentProps)}
     , host_queue{make_lane(handler, kConcurrentProps)}
-    , legs{make_lane(handler, kConcurrentProps)}
     , errors{std::make_shared<HostErrors>()} {
     if (!ctx.contains(default_device))
         throw std::invalid_argument{
@@ -278,9 +277,10 @@ sycl::event copy_on(const Sink& s, const sycl::device* dev, void* dst, const voi
     // One device-side operand (device kind) and one host-side one (host or shared kind). A SYCL command touches only
     // the USM of its own context, so this is ONE backend copy, issued on the
     // device side's device, only when the host side is ordinary memory or USM of
-    // that device's context. Anything else is staged through pageable memory
-    // inside one host task: the device leg runs on the device's own context, the
-    // host leg is a memcpy.
+    // that device's context. Anything else is staged through ordinary (pageable)
+    // memory as event-chained legs: each leg stays in one context, the legs are
+    // ordered by events, and every host body is a plain memcpy or empty. Nothing
+    // is submitted from inside a host task.
     if (from.host_side != to.host_side) {
         const operand& devside  = from.host_side ? to : from;
         const operand& hostside = from.host_side ? from : to;
@@ -299,28 +299,42 @@ sycl::event copy_on(const Sink& s, const sycl::device* dev, void* dst, const voi
             return e;
         }
 
-        sycl::queue        legs = s.state().legs;
-        const sycl::device ddev = devside.dev;
-        const bool         down = !from.host_side;  // device side -> host side
-        sycl::event        e    = host_item(s, nullptr, extra, [legs, dctx, ddev, down, dst, src,
-                                                          bytes]() mutable {
-            auto stage = std::vector<std::byte>(bytes);
-            if (down) {
-                legs.submit(sycl::property_list{
-                                sycl::property::command_group::AdaptiveCpp_retarget{dctx, ddev}},
-                            [&](sycl::handler& h) { h.memcpy(stage.data(), src, bytes); })
-                    .wait();
-                std::memcpy(dst, stage.data(), bytes);
-            } else {
-                std::memcpy(stage.data(), src, bytes);
-                legs.submit(sycl::property_list{
-                                sycl::property::command_group::AdaptiveCpp_retarget{dctx, ddev}},
-                            [&](sycl::handler& h) { h.memcpy(dst, stage.data(), bytes); })
-                    .wait();
-            }
+        // The bounce buffer is ordinary memory, allocated here on the calling
+        // thread; the last leg's host task keeps it alive until the copy is done.
+        auto                stage = std::make_shared<std::vector<std::byte>>(bytes);
+        const sycl::device& ddev  = devside.dev;
+
+        if (!from.host_side) {
+            // Device side -> host side: the backend leg into the buffer, then a
+            // host memcpy out of it.
+            submission leg = s.begin(&ddev, extra);
+            sycl::event e1 = leg.target->submit(leg.props, [&](sycl::handler& h) {
+                h.depends_on(leg.deps);
+                h.memcpy(stage->data(), src, bytes);
+            });
+            const std::vector<sycl::event> after_leg{e1};
+            sycl::event e2 = host_item(s, nullptr, &after_leg, [stage, dst, bytes] {
+                std::memcpy(dst, stage->data(), bytes);
+            });
+            s.record(e2);
+            return e2;
+        }
+
+        // Host side -> device side: a host memcpy into the buffer, then the
+        // backend leg out of it, then a release of the buffer.
+        sycl::event e1 = host_item(s, nullptr, extra, [stage, src, bytes] {
+            std::memcpy(stage->data(), src, bytes);
         });
-        s.record(e);
-        return e;
+        const std::vector<sycl::event> after_copy{e1};
+        submission                     leg = s.begin(&ddev, &after_copy);
+        sycl::event                    e2  = leg.target->submit(leg.props, [&](sycl::handler& h) {
+            h.depends_on(leg.deps);
+            h.memcpy(dst, stage->data(), bytes);
+        });
+        const std::vector<sycl::event> after_leg{e2};
+        sycl::event                    e3 = host_item(s, nullptr, &after_leg, [stage] {});
+        s.record(e3);
+        return e3;
     }
 
     // Both device-side with a direct route between them: one backend copy.
@@ -336,30 +350,27 @@ sycl::event copy_on(const Sink& s, const sycl::device* dev, void* dst, const voi
     }
 
     // Two device operands with no context over both: down into a host
-    // intermediate, then up. Both legs are issued from INSIDE one host task,
-    // which waits each of them, so the second never carries a dependency across
-    // a backend and the caller is never blocked by either. The intermediate
-    // dies with the task's closure, after the copy that read it.
-    sycl::queue          legs = s.state().legs;
-    const sycl::context& sctx = s.state().ctx.context_of(from.dev);
-    const sycl::context& dctx = s.state().ctx.context_of(to.dev);
-    const sycl::device   sdev = from.dev;
-    const sycl::device   ddev = to.dev;
-
-    sycl::event e = host_item(s, nullptr, extra, [legs, sctx, dctx, sdev, ddev, dst, src,
-                                                  bytes]() mutable {
-        auto stage = std::vector<std::byte>(bytes);
-        legs.submit(sycl::property_list{
-                        sycl::property::command_group::AdaptiveCpp_retarget{sctx, sdev}},
-                    [&](sycl::handler& h) { h.memcpy(stage.data(), src, bytes); })
-            .wait();
-        legs.submit(sycl::property_list{
-                        sycl::property::command_group::AdaptiveCpp_retarget{dctx, ddev}},
-                    [&](sycl::handler& h) { h.memcpy(dst, stage.data(), bytes); })
-            .wait();
+    // intermediate, then up, as event-chained legs. Each leg stays in one
+    // context (the source device's, then the destination's); the second leg
+    // depends on the first through an event, across backends if need be, and the
+    // release of the intermediate depends on the second. Every host body is
+    // empty. Nothing is submitted from inside a host task.
+    auto                 stage = std::make_shared<std::vector<std::byte>>(bytes);
+    submission                     down = s.begin(&from.dev, extra);
+    sycl::event                    e1   = down.target->submit(down.props, [&](sycl::handler& h) {
+        h.depends_on(down.deps);
+        h.memcpy(stage->data(), src, bytes);
     });
-    s.record(e);
-    return e;
+    const std::vector<sycl::event> after_down{e1};
+    submission                     up = s.begin(&to.dev, &after_down);
+    sycl::event                    e2 = up.target->submit(up.props, [&](sycl::handler& h) {
+        h.depends_on(up.deps);
+        h.memcpy(dst, stage->data(), bytes);
+    });
+    const std::vector<sycl::event> after_up{e2};
+    sycl::event                    e3 = host_item(s, nullptr, &after_up, [stage] {});
+    s.record(e3);
+    return e3;
 }
 
 sycl::event set_on(const Sink& s, const sycl::device* dev, void* p, int value,
