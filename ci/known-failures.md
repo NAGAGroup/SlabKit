@@ -5,7 +5,7 @@ The names live in `ci/exclude/<platform>-<backend>.txt`; each is listed here wit
 
 ## osx-arm64, Metal (informational)
 
-Eighteen tests launch a kernel that spins until the host opens a gate (`Gate` / `WritingGate` in the test sources). On Metal a
+Seventeen tests launch a kernel that spins until the host opens a gate (`Gate` / `WritingGate` in the test sources). On Metal a
 spinning command buffer hits the GPU watchdog and AdaptiveCpp terminates the whole process, which ends the run, so the tests
 after it never execute. Observed individually in two of them (runs 39211549744 and 39214204546):
 
@@ -18,7 +18,7 @@ The application will now be terminated.
 libc++abi: terminating
 ```
 
-The other sixteen are excluded on the same mechanism, found by scanning the sources for gate use, not observed one by one:
+The other fifteen are excluded on the same mechanism, found by scanning the sources for gate use, not observed one by one:
 
 - `a kernel with a dependency does not run until the event completes`
 - `an async_host task runs after its dependency, and its exception surfaces`
