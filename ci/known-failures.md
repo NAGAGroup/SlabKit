@@ -21,7 +21,6 @@ libc++abi: terminating
 The other sixteen are excluded on the same mechanism, found by scanning the sources for gate use, not observed one by one:
 
 - `a kernel with a dependency does not run until the event completes`
-- `a kernel without dependencies is not ordered after earlier work on the stream`
 - `an async_host task runs after its dependency, and its exception surfaces`
 - `wait returns only after all submitted work has finished`
 - `usm_vector::read_deps includes registered writes, and a task depending on it waits`

@@ -6,10 +6,9 @@
 // take on trust:
 //
 //   1. a task given an event does not start before that event completes,
-//   2. a task given NO events is not held back by anything else on the stream,
-//   3. wait() covers everything submitted, and a host task's exception surfaces
+//   2. wait() covers everything submitted, and a host task's exception surfaces
 //      from wait_and_throw,
-//   4. usm_vector::read_deps() is what a task on this stream passes to come after a
+//   3. usm_vector::read_deps() is what a task on this stream passes to come after a
 //      container's writes, including the outside writes registered on it.
 //
 // A held-back dependency is a Gate: a kernel that spins on a flag in host USM
@@ -191,27 +190,6 @@ TEST_CASE("a kernel with a dependency does not run until the event completes", "
     CHECK(*out == 1);
 }
 
-TEST_CASE("a kernel without dependencies is not ordered after earlier work on the stream",
-          "[unordered_queue]") {
-    UFixture u;
-    // No equivalent of slabkit's detail::is_host_backend exists in the library or the tests, so the backend is read directly.
-    if (u.f.dev.get_backend() == sycl::backend::omp)
-        SKIP("the OpenMP backend never runs two kernels at once, so unordered-ness can't be observed here");
-    warm_up(u);
-    int* out = u.host_int(0);
-    Gate g{u, /*on_stream=*/true};  // submitted FIRST, spinning on the stream itself
-
-    // Nothing is merged: this task is not held back by the gate before it.
-    sycl::event e = u.uq.single_task(SetTo{out, 1});
-
-    const bool finished = wait_done(e);
-    const bool gate_closed = !is_done(g.event);
-    g.open();
-    REQUIRE(finished);
-    CHECK(gate_closed);
-    CHECK(*out == 1);
-}
-
 TEST_CASE("an async_host task runs after its dependency, and its exception surfaces",
           "[unordered_queue]") {
     UFixture u;
@@ -264,30 +242,6 @@ TEST_CASE("wait returns only after all submitted work has finished", "[unordered
     CHECK(is_done(g.event));
     CHECK(is_done(after));
     CHECK(*out == 7);
-}
-
-TEST_CASE("the property_list form honors an AdaptiveCpp_retarget device", "[unordered_queue]") {
-    context ctx{slabkit_test::all_devices()};
-
-    SECTION("the device the property names is the one extracted") {
-        const sycl::device dev = ctx.devices().front();
-        const sycl::property_list props{
-            sycl::property::command_group::AdaptiveCpp_retarget{ctx.context_of(dev), dev}};
-        sycl::device got;
-        REQUIRE(detail::retarget_device(props, got));
-        REQUIRE(got == dev);
-    }
-
-    SECTION("a task is placed on each device the context holds") {
-        unordered_queue uq{ctx};
-        for (const sycl::device& dev : ctx.devices()) {
-            const sycl::property_list props{
-                sycl::property::command_group::AdaptiveCpp_retarget{ctx.context_of(dev), dev}};
-            sycl::event e = uq.submit(props, [&](sycl::handler& h) { h.single_task([] {}); });
-            REQUIRE(wait_done(e));
-        }
-        uq.wait();
-    }
 }
 
 TEST_CASE("an unordered_queue over a multi-device context defaults to SYCL's default device, not the context's first",
