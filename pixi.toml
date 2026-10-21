@@ -20,7 +20,7 @@ catch2                 = ">=3.8"
 naga-acpp-runtime-cuda = "*"
 naga-acpp-runtime-ocl  = "*"
 intel-opencl-rt        = "*"
-naga-acpp-tools        = "==2026.10.20"
+naga-acpp-tools        = "==2026.10.21"
 nushell                = ">=0.116.1,<0.117"
 
 # Compiler stems resolve to <stem>_<platform> activation packages; their
@@ -28,8 +28,8 @@ nushell                = ">=0.116.1,<0.117"
 [workspace.build-variants]
 c_compiler           = ["naga-acpp-clang"]
 cxx_compiler         = ["naga-acpp-clangxx"]
-c_compiler_version   = ["2026.10.20"]
-cxx_compiler_version = ["2026.10.20"]
+c_compiler_version   = ["2026.10.21"]
+cxx_compiler_version = ["2026.10.21"]
 naga-acpp-llvm       = ["23"]
 cmake                = ["4.4.*"]
 
