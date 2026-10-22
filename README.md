@@ -1,6 +1,6 @@
 # slabkit
 
-[![CI](https://github.com/NAGAGroup/SlabKit/actions/workflows/ci.yml/badge.svg)](https://github.com/NAGAGroup/SlabKit/actions/workflows/ci.yml)
+[![CI](https://github.com/NAGALabsOrg/SlabKit/actions/workflows/ci.yml/badge.svg)](https://github.com/NAGALabsOrg/SlabKit/actions/workflows/ci.yml)
 
 USM memory for SYCL programs that run on several devices: owning handles, one
 in-order stream of work, and copies that route themselves.
