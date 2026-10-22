@@ -326,4 +326,4 @@ memory from the host, or use device-kind containers with `host_view()` and
 
 ## License
 
-Apache-2.0. Copyright 2026 Jack Myers. See `LICENSE` and `NOTICE`.
+Apache-2.0. Copyright 2026 NAGA Labs LLC. See `LICENSE` and `NOTICE`.
